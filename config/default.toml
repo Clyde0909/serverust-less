@@ -1,0 +1,16 @@
+# Server configuration
+[server]
+host = "127.0.0.1"
+port = 3000
+log_level = "info"
+
+# Database configuration
+[database]
+path = "./data/serverust.db"
+max_connections = 10
+
+# Worker configuration  
+[worker]
+pool_size = 4
+default_timeout_seconds = 30
+default_memory_limit_mb = 128
