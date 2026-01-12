@@ -1,8 +1,20 @@
 //! Database layer module
 
+pub mod audit;
+pub mod execution_logs;
+pub mod executions;
 pub mod jobs;
+pub mod packages;
+pub mod queue;
+pub mod venvs;
 
+pub use audit::AuditRepository;
+pub use execution_logs::ExecutionLogRepository;
+pub use executions::ExecutionRepository;
 pub use jobs::JobRepository;
+pub use packages::PackageRepository;
+pub use queue::QueueRepository;
+pub use venvs::VenvRepository;
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::time::Duration;

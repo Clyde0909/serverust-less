@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use utoipa::ToSchema;
 use uuid::Uuid;
+use validator::Validate;
 
 /// Job entity representing a Python code job
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
@@ -36,49 +37,63 @@ pub struct Job {
 }
 
 /// Request to create a new job
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema, Validate)]
 pub struct CreateJobRequest {
-    /// Job name (required)
+    /// Job name (required, 1-100 characters)
+    #[validate(length(min = 1, max = 100, message = "Name must be 1-100 characters"))]
     pub name: String,
-    /// Optional description
+    /// Optional description (max 1000 characters)
+    #[validate(length(max = 1000, message = "Description must be at most 1000 characters"))]
     pub description: Option<String>,
-    /// Python code to execute (required)
+    /// Python code to execute (required, max 100KB)
+    #[validate(length(min = 1, max = 102400, message = "Python code must be 1-102400 characters"))]
     pub python_code: String,
-    /// Execution timeout in seconds (default: 30)
+    /// Execution timeout in seconds (default: 30, range: 1-3600)
     #[serde(default = "default_timeout")]
+    #[validate(range(min = 1, max = 3600, message = "Timeout must be 1-3600 seconds"))]
     pub timeout_seconds: i32,
-    /// Memory limit in MB (default: 128)
+    /// Memory limit in MB (default: 128, range: 16-4096)
     #[serde(default = "default_memory_limit")]
+    #[validate(range(min = 16, max = 4096, message = "Memory limit must be 16-4096 MB"))]
     pub memory_limit_mb: i32,
     /// Whether to use a custom virtual environment (default: false)
     #[serde(default)]
     pub use_custom_venv: bool,
-    /// Job priority (default: 0)
+    /// Job priority (default: 0, range: -100 to 100)
     #[serde(default)]
+    #[validate(range(min = -100, max = 100, message = "Priority must be -100 to 100"))]
     pub priority: i32,
-    /// Maximum retry attempts (default: 0)
+    /// Maximum retry attempts (default: 0, range: 0-10)
     #[serde(default)]
+    #[validate(range(min = 0, max = 10, message = "Max retries must be 0-10"))]
     pub max_retries: i32,
 }
 
 /// Request to update an existing job
-#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, ToSchema, Validate)]
 pub struct UpdateJobRequest {
-    /// Job name
+    /// Job name (1-100 characters)
+    #[validate(length(min = 1, max = 100, message = "Name must be 1-100 characters"))]
     pub name: Option<String>,
-    /// Description
+    /// Description (max 1000 characters)
+    #[validate(length(max = 1000, message = "Description must be at most 1000 characters"))]
     pub description: Option<String>,
-    /// Python code
+    /// Python code (max 100KB)
+    #[validate(length(min = 1, max = 102400, message = "Python code must be 1-102400 characters"))]
     pub python_code: Option<String>,
-    /// Execution timeout in seconds
+    /// Execution timeout in seconds (range: 1-3600)
+    #[validate(range(min = 1, max = 3600, message = "Timeout must be 1-3600 seconds"))]
     pub timeout_seconds: Option<i32>,
-    /// Memory limit in MB
+    /// Memory limit in MB (range: 16-4096)
+    #[validate(range(min = 16, max = 4096, message = "Memory limit must be 16-4096 MB"))]
     pub memory_limit_mb: Option<i32>,
     /// Whether to use a custom virtual environment
     pub use_custom_venv: Option<bool>,
-    /// Job priority
+    /// Job priority (range: -100 to 100)
+    #[validate(range(min = -100, max = 100, message = "Priority must be -100 to 100"))]
     pub priority: Option<i32>,
-    /// Maximum retry attempts
+    /// Maximum retry attempts (range: 0-10)
+    #[validate(range(min = 0, max = 10, message = "Max retries must be 0-10"))]
     pub max_retries: Option<i32>,
     /// Whether the job is enabled
     pub enabled: Option<bool>,

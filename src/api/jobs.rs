@@ -15,9 +15,9 @@ use crate::models::{CreateJobRequest, Job, JobListResponse, ListJobsQuery, Updat
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
-        .route("/jobs/{id}", get(get_job).put(update_job).delete(delete_job))
-        .route("/jobs/{id}/enable", post(enable_job))
-        .route("/jobs/{id}/disable", post(disable_job))
+        .route("/jobs/:id", get(get_job).put(update_job).delete(delete_job))
+        .route("/jobs/:id/enable", post(enable_job))
+        .route("/jobs/:id/disable", post(disable_job))
 }
 
 /// List all jobs with pagination

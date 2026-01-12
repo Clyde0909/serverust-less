@@ -31,5 +31,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 config = "0.14"
 dotenvy = "0.15"
 
+# SSE streaming
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+# Process management (Unix)
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal", "process"] }
+
+# Temp files for resource limits
+tempfile = "3"
+
+# Validation
+validator = { version = "0.18", features = ["derive"] }
+
 [dev-dependencies]
 reqwest = { version = "0.11", features = ["json"] }

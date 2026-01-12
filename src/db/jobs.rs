@@ -1,6 +1,7 @@
 //! Job repository for database operations
 
 use sqlx::SqlitePool;
+use tracing::{debug, instrument, trace};
 
 use crate::error::AppError;
 use crate::models::{Job, ListJobsQuery};
@@ -18,7 +19,9 @@ impl JobRepository {
     }
 
     /// Create a new job
+    #[instrument(skip(self, job), fields(job_id = %job.id, job_name = %job.name))]
     pub async fn create(&self, job: &Job) -> Result<Job, AppError> {
+        trace!("Inserting job into database");
         sqlx::query(
             r#"
             INSERT INTO jobs (
@@ -43,11 +46,14 @@ impl JobRepository {
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        debug!("Job inserted successfully");
         self.get_by_id(&job.id).await
     }
 
     /// Get a job by ID
+    #[instrument(skip(self))]
     pub async fn get_by_id(&self, id: &str) -> Result<Job, AppError> {
+        trace!("Fetching job by ID");
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
@@ -64,7 +70,9 @@ impl JobRepository {
     }
 
     /// Get a job by name
+    #[instrument(skip(self))]
     pub async fn get_by_name(&self, name: &str) -> Result<Option<Job>, AppError> {
+        trace!("Fetching job by name");
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
