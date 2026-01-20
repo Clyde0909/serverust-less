@@ -5,7 +5,8 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use serde::Deserialize;
+use reqwest;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::api::AppState;
@@ -19,6 +20,7 @@ use crate::models::{
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/packages", get(list_packages))
+        .route("/packages/search", get(search_pypi))
         .route("/packages/install", post(install_package))
         .route("/packages/main-venv", get(get_main_venv_packages))
         .route("/packages/:name/:version", delete(delete_package))
@@ -41,6 +43,75 @@ pub async fn list_packages(
 ) -> Result<Json<PackageListResponse>, AppError> {
     let response = state.package_service.list_packages().await?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    q: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PyPiSearchResult {
+    name: String,
+    version: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchResponse {
+    results: Vec<PyPiSearchResult>,
+}
+
+/// Search PyPI for packages
+#[utoipa::path(
+    get,
+    path = "/api/v1/packages/search",
+    tag = "packages",
+    params(
+        ("q" = String, Query, description = "Search query")
+    ),
+    responses(
+        (status = 200, description = "Search results", body = SearchResponse)
+    )
+)]
+pub async fn search_pypi(
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, AppError> {
+    let client = reqwest::Client::new();
+    let url = format!("https://pypi.org/pypi/{}/json", params.q);
+    
+    // Try to fetch exact package match
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            #[derive(Deserialize)]
+            struct PyPiResponse {
+                info: PyPiInfo,
+            }
+            
+            #[derive(Deserialize)]
+            struct PyPiInfo {
+                name: String,
+                version: String,
+                summary: Option<String>,
+            }
+            
+            if let Ok(pypi_resp) = response.json::<PyPiResponse>().await {
+                return Ok(Json(SearchResponse {
+                    results: vec![PyPiSearchResult {
+                        name: pypi_resp.info.name,
+                        version: pypi_resp.info.version,
+                        description: pypi_resp.info.summary.unwrap_or_default(),
+                    }],
+                }));
+            }
+        }
+        _ => {}
+    }
+    
+    // Return empty results if no exact match found
+    Ok(Json(SearchResponse {
+        results: vec![],
+    }))
 }
 
 /// Install a package to main venv

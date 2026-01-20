@@ -97,10 +97,7 @@ impl PackageService {
             use_count: 0,
         };
 
-        // Record installation start
-        cache = self.repo.upsert_cache(&cache).await?;
-
-        // Perform actual installation
+        // Perform actual installation (don't save cache yet to avoid duplicate ID issues)
         let version_constraint = req.version.as_deref();
         let result = package_manager
             .install_to_main_venv(&main_venv_path, &req.name, version_constraint)
@@ -135,14 +132,16 @@ impl PackageService {
                 warn!("Package {} installation failed: {}", req.name, err);
                 cache.status = PackageStatus::Failed.as_str().to_string();
                 cache.error_message = Some(err.clone());
-                let updated_cache = self.repo.upsert_cache(&cache).await?;
+                // Save failed status to cache
+                self.repo.upsert_cache(&cache).await?;
                 return Err(AppError::Internal(format!("Package installation failed: {}", err)));
             }
             _ => {
                 warn!("Package {} installation failed with unknown error", req.name);
                 cache.status = PackageStatus::Failed.as_str().to_string();
                 cache.error_message = Some("Unknown installation error".to_string());
-                let updated_cache = self.repo.upsert_cache(&cache).await?;
+                // Save failed status to cache
+                self.repo.upsert_cache(&cache).await?;
                 return Err(AppError::Internal("Package installation failed".to_string()));
             }
         }

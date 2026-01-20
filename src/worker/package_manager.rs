@@ -74,7 +74,17 @@ impl PackageManager {
 
         // Build the package spec
         let package_spec = match version_constraint {
-            Some(constraint) if constraint != "*" => format!("{}{}", package_name, constraint),
+            Some(constraint) if constraint != "*" => {
+                // If constraint doesn't start with an operator, default to ==
+                if constraint.starts_with("==") || constraint.starts_with(">=") 
+                   || constraint.starts_with("<=") || constraint.starts_with(">") 
+                   || constraint.starts_with("<") || constraint.starts_with("~=") 
+                   || constraint.starts_with("!=") {
+                    format!("{}{}", package_name, constraint)
+                } else {
+                    format!("{}=={}", package_name, constraint)
+                }
+            }
             _ => package_name.to_string(),
         };
 
