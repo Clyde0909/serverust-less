@@ -119,7 +119,24 @@ async fn main() -> anyhow::Result<()> {
         execution_log_repo.clone(),
         job_repo.clone(),
     );
-    let package_service = PackageService::new(package_repo.clone());
+    
+    // Initialize worker managers for package installation
+    let venv_manager = std::sync::Arc::new(serverust_less::worker::VenvManager::new(
+        &config.packages.main_venv_path,
+        &config.worker.python_executable,
+    ));
+    
+    let package_manager = std::sync::Arc::new(serverust_less::worker::PackageManager::new(
+        config.packages.pip_timeout_seconds,
+        config.packages.enable_pip_cache,
+        None, // cache_dir - can be configured if needed
+    ));
+    
+    let package_service = PackageService::with_workers(
+        package_repo.clone(),
+        venv_manager,
+        package_manager,
+    );
     let venv_service = VenvService::new(venv_repo.clone());
     let queue_service = QueueService::new(queue_repo.clone());
     let audit_service = AuditService::new(audit_repo.clone(), config.security.enable_audit_log);

@@ -58,9 +58,8 @@ pub async fn install_package(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InstallPackageRequest>,
 ) -> Result<Json<PackageCache>, AppError> {
-    // This would trigger the actual installation via the worker pool
-    // For now, we'll return a placeholder
-    Err(AppError::Internal("Package installation not implemented yet".to_string()))
+    let cache = state.package_service.install_package(req).await?;
+    Ok(Json(cache))
 }
 
 /// Get main venv packages

@@ -6,23 +6,149 @@ use crate::models::{
     AddDependencyRequest, DependencyListResponse, DependencyStatusResponse, InstallPackageRequest,
     JobDependency, PackageCache, PackageInstallStatus, PackageListResponse, PackageStatus,
 };
+use crate::worker::{PackageManager, VenvManager};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::{info, warn};
+use uuid::Uuid;
 
 /// Service for package management
 #[derive(Clone)]
 pub struct PackageService {
     repo: PackageRepository,
+    venv_manager: Option<Arc<VenvManager>>,
+    package_manager: Option<Arc<PackageManager>>,
 }
 
 impl PackageService {
     /// Create a new PackageService
     pub fn new(repo: PackageRepository) -> Self {
-        Self { repo }
+        Self { 
+            repo,
+            venv_manager: None,
+            package_manager: None,
+        }
+    }
+
+    /// Create a new PackageService with worker integration
+    pub fn with_workers(
+        repo: PackageRepository,
+        venv_manager: Arc<VenvManager>,
+        package_manager: Arc<PackageManager>,
+    ) -> Self {
+        Self {
+            repo,
+            venv_manager: Some(venv_manager),
+            package_manager: Some(package_manager),
+        }
     }
 
     /// List all cached packages
     pub async fn list_packages(&self) -> Result<PackageListResponse, AppError> {
         let (packages, total) = self.repo.list_all_cached().await?;
         Ok(PackageListResponse { packages, total })
+    }
+
+    /// Install a package to main venv
+    pub async fn install_package(&self, req: InstallPackageRequest) -> Result<PackageCache, AppError> {
+        // Validate package name
+        if req.name.trim().is_empty() {
+            return Err(AppError::Validation("Package name cannot be empty".to_string()));
+        }
+
+        info!("Installing package: {} (version: {:?})", req.name, req.version);
+
+        // Check if we have worker integration
+        let (venv_manager, package_manager) = match (&self.venv_manager, &self.package_manager) {
+            (Some(v), Some(p)) => (v, p),
+            _ => {
+                warn!("Package installation requested but worker managers not configured");
+                return Err(AppError::Internal(
+                    "Package installation service not available".to_string(),
+                ));
+            }
+        };
+
+        // Get main venv path
+        let main_venv_path = venv_manager.main_venv_path();
+
+        // Check if venv exists, create if needed
+        if !venv_manager.main_venv_exists() {
+            info!("Main venv does not exist, creating...");
+            venv_manager.create_main_venv().await.map_err(|e| {
+                AppError::Internal(format!("Failed to create main venv: {}", e))
+            })?;
+        }
+
+        // Create cache entry to track installation
+        let cache_id = uuid::Uuid::new_v4().to_string();
+        let mut cache = PackageCache {
+            id: cache_id,
+            venv_type: "main".to_string(),
+            venv_id: None,
+            package_name: req.name.clone(),
+            version: req.version.clone().unwrap_or_else(|| "latest".to_string()),
+            installation_path: main_venv_path.to_string_lossy().to_string(),
+            size_bytes: None,
+            status: PackageStatus::Installing.as_str().to_string(),
+            error_message: None,
+            installed_at: chrono::Utc::now().to_rfc3339(),
+            last_used_at: Some(chrono::Utc::now().to_rfc3339()),
+            use_count: 0,
+        };
+
+        // Record installation start
+        cache = self.repo.upsert_cache(&cache).await?;
+
+        // Perform actual installation
+        let version_constraint = req.version.as_deref();
+        let result = package_manager
+            .install_to_main_venv(&main_venv_path, &req.name, version_constraint)
+            .await;
+
+        // Update cache based on result
+        match result {
+            crate::worker::InstallResult {
+                success: true,
+                version: Some(installed_version),
+                ..
+            } => {
+                info!("Package {} installed successfully: {}", req.name, installed_version);
+                cache.version = installed_version;
+                cache.status = PackageStatus::Ready.as_str().to_string();
+                cache.error_message = None;
+            }
+            crate::worker::InstallResult {
+                success: true,
+                version: None,
+                ..
+            } => {
+                info!("Package {} installed successfully (version unknown)", req.name);
+                cache.status = PackageStatus::Ready.as_str().to_string();
+                cache.error_message = None;
+            }
+            crate::worker::InstallResult {
+                success: false,
+                error: Some(err),
+                ..
+            } => {
+                warn!("Package {} installation failed: {}", req.name, err);
+                cache.status = PackageStatus::Failed.as_str().to_string();
+                cache.error_message = Some(err.clone());
+                let updated_cache = self.repo.upsert_cache(&cache).await?;
+                return Err(AppError::Internal(format!("Package installation failed: {}", err)));
+            }
+            _ => {
+                warn!("Package {} installation failed with unknown error", req.name);
+                cache.status = PackageStatus::Failed.as_str().to_string();
+                cache.error_message = Some("Unknown installation error".to_string());
+                let updated_cache = self.repo.upsert_cache(&cache).await?;
+                return Err(AppError::Internal("Package installation failed".to_string()));
+            }
+        }
+
+        // Update cache with final status
+        self.repo.upsert_cache(&cache).await
     }
 
     /// Get packages in main venv
