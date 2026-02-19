@@ -196,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let venv_manager = Arc::new(VenvManager::new(
-        &config.packages.main_venv_path,
+        &config.packages.custom_venv_base_path,
         &config.worker.python_executable,
     ));
     let package_manager_worker = Arc::new(PackageManager::new(
