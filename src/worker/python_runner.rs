@@ -87,11 +87,17 @@ INPUT_DATA = json.loads('''{}''')
             "Executing Python code"
         );
 
-        // Choose python executable: prefer venv's python, fall back to configured python_executable
+        // Choose python executable: prefer venv's python, fall back only if no venv path given.
+        // Using an absolute path avoids silent fallback to system Python when the relative
+        // ./venvs/main/bin/python check fails due to a different process CWD.
         let chosen_python_path = if python_path.exists() {
             python_path
         } else {
-            debug!(path = %python_path.display(), "venv python not found, falling back to configured python");
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found at expected path — falling back to configured executable. \
+                 Packages installed in the venv will NOT be available."
+            );
             std::path::PathBuf::from(&self.python_executable)
         };
 
@@ -400,7 +406,11 @@ INPUT_DATA = json.loads('''{inp}''')
         let chosen_python_path = if python_path.exists() {
             python_path
         } else {
-            debug!(path = %python_path.display(), "venv python not found, falling back to configured python");
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found at expected path — falling back to configured executable. \
+                 Packages installed in the venv will NOT be available."
+            );
             std::path::PathBuf::from(&self.python_executable)
         };
 

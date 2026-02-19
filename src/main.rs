@@ -40,10 +40,33 @@ async fn main() -> anyhow::Result<()> {
     // Configuration
     // -------------------------------------------------------------------------
     let config = AppConfig::load()?;
+
+    // -------------------------------------------------------------------------
+    // Resolve all file-system paths to absolute so that relative config values
+    // (e.g. "./venvs/main") work correctly regardless of the process CWD.
+    // -------------------------------------------------------------------------
+    let cwd = std::env::current_dir()?;
+    let abs_main_venv_path = if config.packages.main_venv_path.is_absolute() {
+        config.packages.main_venv_path.clone()
+    } else {
+        cwd.join(&config.packages.main_venv_path)
+    };
+    let abs_custom_venv_base_path = if config.packages.custom_venv_base_path.is_absolute() {
+        config.packages.custom_venv_base_path.clone()
+    } else {
+        cwd.join(&config.packages.custom_venv_base_path)
+    };
+    let abs_db_path = if config.database.path.is_absolute() {
+        config.database.path.clone()
+    } else {
+        cwd.join(&config.database.path)
+    };
+
     info!(
         host = %config.server.host,
         port = config.server.port,
-        db_path = %config.database.path.display(),
+        db_path = %abs_db_path.display(),
+        main_venv = %abs_main_venv_path.display(),
         pool_size = config.worker.pool_size,
         "Configuration loaded"
     );
@@ -51,36 +74,34 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------------------------------------
     // Directory setup
     // -------------------------------------------------------------------------
-    if let Some(parent) = config.database.path.parent() {
+    if let Some(parent) = abs_db_path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent)?;
             info!("Created database directory: {}", parent.display());
         }
     }
 
-    if let Some(parent) = config.packages.main_venv_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-            info!("Created venv base directory: {}", parent.display());
-        }
+    if !abs_custom_venv_base_path.exists() {
+        std::fs::create_dir_all(&abs_custom_venv_base_path)?;
+        info!("Created venv base directory: {}", abs_custom_venv_base_path.display());
     }
 
     // -------------------------------------------------------------------------
     // Auto-create main venv if missing
     // -------------------------------------------------------------------------
     let main_venv_python = if cfg!(windows) {
-        config.packages.main_venv_path.join("Scripts").join("python.exe")
+        abs_main_venv_path.join("Scripts").join("python.exe")
     } else {
-        config.packages.main_venv_path.join("bin").join("python")
+        abs_main_venv_path.join("bin").join("python")
     };
 
     if !main_venv_python.exists() {
         info!(
             "Main venv not found, creating at: {}",
-            config.packages.main_venv_path.display()
+            abs_main_venv_path.display()
         );
         match std::process::Command::new("python3")
-            .args(["-m", "venv", config.packages.main_venv_path.to_str().unwrap()])
+            .args(["-m", "venv", abs_main_venv_path.to_str().unwrap()])
             .output()
         {
             Ok(output) if output.status.success() => {
@@ -97,14 +118,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         info!(
             "Main venv already exists at: {}",
-            config.packages.main_venv_path.display()
+            abs_main_venv_path.display()
         );
     }
 
     // -------------------------------------------------------------------------
     // Database
     // -------------------------------------------------------------------------
-    let db_url = format!("sqlite:{}?mode=rwc", config.database.path.display());
+    let db_url = format!("sqlite:{}?mode=rwc", abs_db_path.display());
     let pool = init_pool(&db_url).await?;
     info!("Database connection established");
 
@@ -149,8 +170,8 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------------------------------------
     let (worker_pool, mut result_rx) = WorkerPool::new(
         config.worker.pool_size,
-        config.packages.main_venv_path.clone(),
-        config.packages.custom_venv_base_path.clone(),
+        abs_main_venv_path.clone(),
+        abs_custom_venv_base_path.clone(),
         &config.worker.python_executable,
         queue_manager.clone(),
         process_manager.clone(),
@@ -196,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let venv_manager = Arc::new(VenvManager::new(
-        &config.packages.custom_venv_base_path,
+        &abs_custom_venv_base_path,
         &config.worker.python_executable,
     ));
     let package_manager_worker = Arc::new(PackageManager::new(
