@@ -5,9 +5,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::db::QueueRepository;
+use crate::db::{ExecutionRepository, JobRepository, QueueRepository};
 use crate::error::AppError;
-use crate::models::{QueueEntry, QueueItem, QueueStatus};
+use crate::models::{QueueEntry, QueueItem};
 
 /// Queue manager coordinating in-memory and SQLite queues
 pub struct QueueManager {
@@ -17,15 +17,52 @@ pub struct QueueManager {
     max_memory_size: usize,
     /// Persistent queue repository
     repo: QueueRepository,
+    /// Execution repository (for overflow item reconstruction)
+    execution_repo: ExecutionRepository,
+    /// Job repository (for overflow item reconstruction)
+    job_repo: JobRepository,
 }
 
 impl QueueManager {
     /// Create a new QueueManager
-    pub fn new(repo: QueueRepository, max_memory_size: usize) -> Self {
+    pub fn new(
+        repo: QueueRepository,
+        execution_repo: ExecutionRepository,
+        job_repo: JobRepository,
+        max_memory_size: usize,
+    ) -> Self {
         Self {
             memory_queue: Arc::new(Mutex::new(BinaryHeap::new())),
             max_memory_size,
             repo,
+            execution_repo,
+            job_repo,
+        }
+    }
+
+    /// Reconstruct a QueueItem from a QueueEntry by fetching execution + job from DB
+    async fn reconstruct_item(&self, entry: &QueueEntry) -> Option<QueueItem> {
+        match self.execution_repo.get_by_id(&entry.execution_id).await {
+            Ok(exec) => match self.job_repo.get_by_id(&exec.job_id).await {
+                Ok(job) => Some(QueueItem::new(
+                    &exec.id,
+                    &job.id,
+                    entry.priority,
+                    &job.python_code,
+                    job.timeout_seconds,
+                    job.memory_limit_mb,
+                    exec.input_data.clone(),
+                    job.use_custom_venv,
+                )),
+                Err(e) => {
+                    warn!("Failed to get job {} for queue reconstruction: {}", exec.job_id, e);
+                    None
+                }
+            },
+            Err(e) => {
+                warn!("Failed to get execution {} for queue reconstruction: {}", entry.execution_id, e);
+                None
+            }
         }
     }
 
@@ -49,12 +86,13 @@ impl QueueManager {
         Ok(())
     }
 
-    /// Dequeue the next item
+    /// Dequeue the highest-priority item.
+    /// Falls back to SQLite overflow when the in-memory queue is empty.
     pub async fn dequeue(&self) -> Result<Option<QueueItem>, AppError> {
         let mut queue = self.memory_queue.lock().await;
 
+        // Fast path: in-memory queue
         if let Some(item) = queue.pop() {
-            // Update persistent entry status
             if let Some(mut entry) = self.repo.get_by_execution(&item.execution_id).await? {
                 entry.mark_processing();
                 self.repo.update(&entry).await?;
@@ -62,12 +100,22 @@ impl QueueManager {
             return Ok(Some(item));
         }
 
-        // Check overflow queue
-        if let Some(entry) = self.repo.dequeue().await? {
-            // Need to reconstruct the QueueItem from the entry
-            // This requires additional data that should be stored
-            // For now, return None as we need the job details
-            debug!("Found item in overflow queue: {}", entry.execution_id);
+        // Slow path: SQLite overflow
+        if let Some(mut entry) = self.repo.dequeue().await? {
+            debug!("Dequeuing overflow item: execution={}", entry.execution_id);
+            if let Some(item) = self.reconstruct_item(&entry).await {
+                entry.mark_processing();
+                self.repo.update(&entry).await?;
+                return Ok(Some(item));
+            } else {
+                // Cannot reconstruct — mark failed so it doesn't permanently block the queue
+                warn!(
+                    "Could not reconstruct QueueItem for execution {}, marking failed",
+                    entry.execution_id
+                );
+                entry.mark_failed();
+                self.repo.update(&entry).await?;
+            }
         }
 
         Ok(None)
@@ -124,14 +172,32 @@ impl QueueManager {
         self.repo.cleanup_old(older_than_hours).await
     }
 
-    /// Recover queue from database on startup
+    /// Recover queue state from DB after a restart.
+    /// Loads queued items (up to max_memory_size) back into the in-memory heap.
     pub async fn recover(&self) -> Result<usize, AppError> {
         let entries = self.repo.get_all_queued().await?;
-        info!("Recovering {} queue entries from database", entries.len());
+        let total = entries.len();
+        info!("Recovering {} queued entries from database", total);
 
-        // Note: We can't fully reconstruct QueueItems without job details
-        // This would need to be enhanced in a real implementation
-        Ok(entries.len())
+        let mut queue = self.memory_queue.lock().await;
+        let mut recovered = 0usize;
+
+        for entry in &entries {
+            if queue.len() >= self.max_memory_size {
+                break;
+            }
+            if let Some(item) = self.reconstruct_item(entry).await {
+                queue.push(item);
+                recovered += 1;
+            }
+        }
+
+        let overflow = total.saturating_sub(recovered);
+        info!(
+            "Queue recovered: {} in-memory, {} remain in SQLite overflow",
+            recovered, overflow
+        );
+        Ok(total)
     }
 }
 

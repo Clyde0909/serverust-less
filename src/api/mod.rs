@@ -15,9 +15,11 @@ use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::queue::QueueManager;
 use crate::services::{
     AuditService, ExecutionService, JobService, PackageService, QueueService, VenvService,
 };
+use crate::worker::ProcessManager;
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -28,6 +30,10 @@ pub struct AppState {
     pub venv_service: VenvService,
     pub queue_service: QueueService,
     pub audit_service: AuditService,
+    /// Shared queue manager — API handlers enqueue here, workers dequeue from here.
+    pub queue_manager: Arc<QueueManager>,
+    /// Process manager — used by cancel handlers to kill running executions.
+    pub process_manager: Arc<ProcessManager>,
 }
 
 /// OpenAPI documentation

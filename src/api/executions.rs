@@ -16,7 +16,7 @@ use crate::api::AppState;
 use crate::error::AppError;
 use crate::models::{
     ExecuteJobRequest, Execution, ExecutionListResponse, ExecutionLogsResponse,
-    ListExecutionsQuery, ListLogsQuery,
+    ListExecutionsQuery, ListLogsQuery, QueueItem,
 };
 
 /// Create the executions router
@@ -142,6 +142,8 @@ pub async fn cancel_execution(
     Path(id): Path<String>,
 ) -> Result<Json<Execution>, AppError> {
     let execution = state.execution_service.cancel_execution(&id).await?;
+    // Also attempt to kill the running process (may be no-op if already finished)
+    let _ = state.process_manager.cancel(&id).await;
     Ok(Json(execution))
 }
 
@@ -164,6 +166,25 @@ pub async fn retry_execution(
     Path(id): Path<String>,
 ) -> Result<Json<Execution>, AppError> {
     let execution = state.execution_service.retry_execution(&id).await?;
+
+    // Enqueue the newly created retry execution
+    let job = state.job_service.get_job(&execution.job_id).await?;
+    let item = QueueItem::new(
+        &execution.id,
+        &job.id,
+        0, // retry uses default priority
+        &job.python_code,
+        job.timeout_seconds,
+        job.memory_limit_mb,
+        execution.input_data.clone(),
+        job.use_custom_venv,
+    );
+    state
+        .queue_manager
+        .enqueue(item)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue retry: {}", e)))?;
+
     Ok(Json(execution))
 }
 
@@ -187,10 +208,30 @@ pub async fn execute_job(
     Path(job_id): Path<String>,
     Json(req): Json<Option<ExecuteJobRequest>>,
 ) -> Result<(axum::http::StatusCode, Json<Execution>), AppError> {
+    let priority = req.as_ref().and_then(|r| r.priority).unwrap_or(0);
     let execution = state
         .execution_service
         .create_execution(&job_id, req)
         .await?;
+
+    // Fetch job details needed to build the QueueItem
+    let job = state.job_service.get_job(&job_id).await?;
+    let item = QueueItem::new(
+        &execution.id,
+        &job.id,
+        priority,
+        &job.python_code,
+        job.timeout_seconds,
+        job.memory_limit_mb,
+        execution.input_data.clone(),
+        job.use_custom_venv,
+    );
+    state
+        .queue_manager
+        .enqueue(item)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue execution: {}", e)))?;
+
     Ok((axum::http::StatusCode::CREATED, Json(execution)))
 }
 
