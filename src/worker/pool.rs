@@ -110,11 +110,42 @@ impl WorkerPool {
                         .create_with_type(&exec_id, LogType::System, "Execution started")
                         .await;
 
-                    // --- Register with ProcessManager (PID obtained after spawn, updated later) ---
-                    let _reg = pm.register(&exec_id, None, worker_id).await;
+                    // --- Register with ProcessManager; obtain cancel signal receiver ---
+                    let reg = pm.register(&exec_id, None, worker_id).await;
 
-                    // --- Execute ---
-                    let result = executor.execute(&item).await;
+                    // --- PID tracking: report PID to ProcessManager right after spawn ---
+                    // This allows process_manager.cancel() to send SIGTERM/SIGKILL while running.
+                    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel::<u32>();
+                    let pm_pid = pm.clone();
+                    let exec_id_pid = exec_id.clone();
+                    tokio::spawn(async move {
+                        if let Ok(pid) = pid_rx.await {
+                            pm_pid.update_pid(&exec_id_pid, pid).await;
+                        }
+                    });
+
+                    // --- Execute with cancellation via select! ---
+                    // If cancel_rx fires (API cancel handler) the executor future is dropped,
+                    // which kills the child process because kill_on_drop(true) is set.
+                    let (result, cancelled_externally) = tokio::select! {
+                        r = executor.execute_with_pid(&item, pid_tx) => (r, false),
+                        _ = reg.cancel_rx => {
+                            info!(
+                                "Worker {} received cancel signal for execution {}",
+                                worker_id, exec_id
+                            );
+                            (crate::worker::python_runner::ExecutionResult {
+                                success: false,
+                                stdout: String::new(),
+                                stderr: "Execution was cancelled".to_string(),
+                                exit_code: None,
+                                duration_ms: 0,
+                                timed_out: false,
+                                memory_exceeded: false,
+                            }, true)
+                        }
+                    };
+                    let _ = cancelled_externally; // used implicitly via DB status check below
 
                     // --- Unregister ---
                     pm.unregister(&exec_id).await;

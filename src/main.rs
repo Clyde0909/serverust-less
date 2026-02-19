@@ -224,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         audit_service,
         queue_manager,
         process_manager,
+        worker_pool_size: config.worker.pool_size,
     };
 
     let app = create_router(state);

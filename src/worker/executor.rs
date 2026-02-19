@@ -38,10 +38,7 @@ impl JobExecutor {
 
     /// Execute a queued item
     pub async fn execute(&self, item: &QueueItem) -> ExecutionResult {
-        // Determine which venv to use
         let venv_path = self.get_venv_path(item);
-
-        // Execute the Python code
         self.runner
             .execute(
                 &venv_path,
@@ -49,6 +46,26 @@ impl JobExecutor {
                 item.input_data.as_deref(),
                 item.timeout_seconds as u64,
                 item.memory_limit_mb as u64,
+            )
+            .await
+    }
+
+    /// Execute a queued item, sending the child PID via `pid_tx` right after spawn.
+    /// Use this variant when cancellation support is required.
+    pub async fn execute_with_pid(
+        &self,
+        item: &QueueItem,
+        pid_tx: tokio::sync::oneshot::Sender<u32>,
+    ) -> ExecutionResult {
+        let venv_path = self.get_venv_path(item);
+        self.runner
+            .execute_with_pid(
+                &venv_path,
+                &item.python_code,
+                item.input_data.as_deref(),
+                item.timeout_seconds as u64,
+                item.memory_limit_mb as u64,
+                pid_tx,
             )
             .await
     }

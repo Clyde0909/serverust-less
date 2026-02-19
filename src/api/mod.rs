@@ -34,6 +34,8 @@ pub struct AppState {
     pub queue_manager: Arc<QueueManager>,
     /// Process manager — used by cancel handlers to kill running executions.
     pub process_manager: Arc<ProcessManager>,
+    /// Total number of worker tasks in the pool (for monitoring).
+    pub worker_pool_size: usize,
 }
 
 /// OpenAPI documentation
@@ -61,6 +63,7 @@ pub struct AppState {
         // Packages
         packages::list_packages,
         packages::install_package,
+        packages::uninstall_package,
         packages::get_main_venv_packages,
         packages::delete_package,
         packages::get_job_dependencies,
@@ -78,6 +81,7 @@ pub struct AppState {
         // Health
         health::health_check,
         health::get_stats,
+        health::get_workers_status,
     ),
     components(
         schemas(

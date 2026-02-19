@@ -170,6 +170,45 @@ impl PackageService {
     }
 
     /// Remove package from cache
+    /// Uninstall a package from the main venv and remove it from the cache.
+    pub async fn uninstall_package(&self, package_name: &str) -> Result<(), AppError> {
+        if package_name.trim().is_empty() {
+            return Err(AppError::Validation("Package name cannot be empty".to_string()));
+        }
+
+        let (venv_manager, package_manager) = match (&self.venv_manager, &self.package_manager) {
+            (Some(v), Some(p)) => (v, p),
+            _ => {
+                return Err(AppError::Internal(
+                    "Package uninstall service not available".to_string(),
+                ));
+            }
+        };
+
+        let main_venv_path = venv_manager.main_venv_path();
+
+        info!("Uninstalling package: {}", package_name);
+        let result = package_manager
+            .uninstall_package(&main_venv_path, package_name)
+            .await;
+
+        if !result.success {
+            let err = result.error.unwrap_or_else(|| "Unknown error".to_string());
+            warn!("Package {} uninstall failed: {}", package_name, err);
+            return Err(AppError::Internal(format!("Package uninstall failed: {}", err)));
+        }
+
+        // Remove all cache entries for this package in the main venv (any version).
+        let cached = self.repo.get_cache_by_venv("main", None).await?;
+        for entry in cached.into_iter().filter(|e| e.package_name.to_lowercase() == package_name.to_lowercase()) {
+            let _ = self.repo.delete_cache("main", None, &entry.package_name, &entry.version).await;
+        }
+
+        info!("Package {} uninstalled successfully", package_name);
+        Ok(())
+    }
+
+    /// Remove package cache entry (DB only, no pip)
     pub async fn remove_package(
         &self,
         package_name: &str,

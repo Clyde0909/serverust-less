@@ -97,7 +97,7 @@ INPUT_DATA = json.loads('''{}''')
 
         // Build the command with resource limits
         let result = self
-            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb)
+            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb, None)
             .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -141,13 +141,17 @@ INPUT_DATA = json.loads('''{}''')
         }
     }
 
-    /// Spawn Python process with resource limits
+    /// Spawn Python process with resource limits.
+    /// If `pid_tx` is provided the child's OS PID is sent through it immediately
+    /// after a successful `spawn()`, before the process is awaited.  This lets
+    /// the caller register the PID for cancellation while the job is running.
     async fn spawn_with_limits(
         &self,
         python_path: &Path,
         code: &str,
         timeout_seconds: u64,
         memory_limit_mb: u64,
+        pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> Result<ExecutionResult, String> {
         debug!(
             python = %python_path.display(),
@@ -188,6 +192,13 @@ INPUT_DATA = json.loads('''{}''')
                 return Err(format!("Failed to spawn Python process: {}", e));
             }
         };
+
+        // Report PID immediately so ProcessManager can send SIGTERM/SIGKILL on cancel.
+        if let Some(tx) = pid_tx {
+            if let Some(pid) = child.id() {
+                let _ = tx.send(pid);
+            }
+        }
 
         // Capture stdout and stderr
         let stdout_handle = child.stdout.take();
@@ -345,6 +356,95 @@ INPUT_DATA = json.loads('''{}''')
             Ok(version)
         } else {
             Err("Python check failed".to_string())
+        }
+    }
+
+    /// Execute Python code, sending the child process PID through `pid_tx`
+    /// immediately after spawn so the caller can arrange cancellation.
+    pub async fn execute_with_pid(
+        &self,
+        venv_path: &Path,
+        code: &str,
+        input_data: Option<&str>,
+        timeout_seconds: u64,
+        memory_limit_mb: u64,
+        pid_tx: tokio::sync::oneshot::Sender<u32>,
+    ) -> ExecutionResult {
+        let start = std::time::Instant::now();
+
+        let python_path = if cfg!(windows) {
+            venv_path.join("Scripts").join("python.exe")
+        } else {
+            venv_path.join("bin").join("python")
+        };
+
+        let full_code = if let Some(input) = input_data {
+            format!(
+                r#"
+import json
+import sys
+
+# Input data
+INPUT_DATA = json.loads('''{inp}''')
+
+# User code
+{code}
+"#,
+                inp = input.replace("'''", r"\'\'\'" ),
+                code = code
+            )
+        } else {
+            code.to_string()
+        };
+
+        let chosen_python_path = if python_path.exists() {
+            python_path
+        } else {
+            debug!(path = %python_path.display(), "venv python not found, falling back to configured python");
+            std::path::PathBuf::from(&self.python_executable)
+        };
+
+        let result = self
+            .spawn_with_limits(
+                &chosen_python_path,
+                &full_code,
+                timeout_seconds,
+                memory_limit_mb,
+                Some(pid_tx),
+            )
+            .await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(exec_result) => {
+                if exec_result.success {
+                    info!(duration_ms, "Python execution (tracked) succeeded");
+                } else {
+                    warn!(
+                        duration_ms,
+                        timed_out = exec_result.timed_out,
+                        memory_exceeded = exec_result.memory_exceeded,
+                        "Python execution (tracked) failed"
+                    );
+                }
+                ExecutionResult {
+                    duration_ms,
+                    ..exec_result
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Python execution error");
+                ExecutionResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: e,
+                    exit_code: None,
+                    duration_ms,
+                    timed_out: false,
+                    memory_exceeded: false,
+                }
+            }
         }
     }
 

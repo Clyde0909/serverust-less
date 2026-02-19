@@ -22,6 +22,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/packages", get(list_packages))
         .route("/packages/search", get(search_pypi))
         .route("/packages/install", post(install_package))
+        .route("/packages/uninstall", post(uninstall_package))
         .route("/packages/main-venv", get(get_main_venv_packages))
         .route("/packages/:name/:version", delete(delete_package))
         .route("/jobs/:id/dependencies", get(get_job_dependencies).post(add_job_dependency))
@@ -131,6 +132,31 @@ pub async fn install_package(
 ) -> Result<Json<PackageCache>, AppError> {
     let cache = state.package_service.install_package(req).await?;
     Ok(Json(cache))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UninstallPackageRequest {
+    pub name: String,
+}
+
+/// Uninstall a package from the main venv
+#[utoipa::path(
+    post,
+    path = "/api/v1/packages/uninstall",
+    tag = "packages",
+    request_body = UninstallPackageRequest,
+    responses(
+        (status = 204, description = "Package uninstalled"),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Uninstall failed")
+    )
+)]
+pub async fn uninstall_package(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UninstallPackageRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    state.package_service.uninstall_package(&req.name).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Get main venv packages
