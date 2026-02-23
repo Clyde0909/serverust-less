@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::{Execution, ExecutionStatus, QueueItem};
+use crate::models::QueueItem;
 use crate::worker::python_runner::{ExecutionResult, PythonRunner};
 
 /// Job executor handles the execution of a single job
@@ -70,7 +70,8 @@ impl JobExecutor {
             .await
     }
 
-    /// Create execution result from runner result
+    /// Create execution result from runner result (test-only helper)
+    #[cfg(test)]
     pub fn create_execution_result(
         &self,
         mut execution: Execution,
@@ -98,6 +99,7 @@ impl JobExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Execution;
 
     fn create_test_queue_item(use_custom_venv: bool) -> QueueItem {
         QueueItem::new(

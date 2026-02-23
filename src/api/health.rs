@@ -81,39 +81,19 @@ pub async fn health_check() -> Json<HealthResponse> {
 pub async fn get_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatsResponse>, AppError> {
-    // Get various statistics
-    let jobs = state.job_service.list_jobs(crate::models::ListJobsQuery {
-        limit: 1,
-        offset: 0,
-        enabled: None,
-        search: None,
-    }).await?;
-
-    let enabled_jobs = state.job_service.list_jobs(crate::models::ListJobsQuery {
-        limit: 1,
-        offset: 0,
-        enabled: Some(true),
-        search: None,
-    }).await?;
-
-    let executions = state.execution_service.list_executions(crate::models::ListExecutionsQuery {
-        limit: 1,
-        offset: 0,
-        status: None,
-        job_id: None,
-        from: None,
-        to: None,
-    }).await?;
-
-    let running = state.execution_service.get_running_executions().await?;
+    // Use dedicated count queries instead of full list queries
+    let total_jobs = state.job_service.count_all().await?;
+    let enabled_jobs = state.job_service.count_enabled().await?;
+    let total_executions = state.execution_service.count_all().await?;
+    let running_executions = state.execution_service.count_running().await?;
     let queue_depth = state.queue_service.get_depth().await?;
     let venvs = state.venv_service.list_venvs().await?;
 
     Ok(Json(StatsResponse {
-        total_jobs: jobs.total,
-        enabled_jobs: enabled_jobs.total,
-        total_executions: executions.total,
-        running_executions: running.len() as i64,
+        total_jobs,
+        enabled_jobs,
+        total_executions,
+        running_executions,
         queue_depth,
         venv_count: venvs.total,
     }))

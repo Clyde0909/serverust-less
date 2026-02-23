@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
             "Main venv not found, creating at: {}",
             abs_main_venv_path.display()
         );
-        match std::process::Command::new("python3")
+        match std::process::Command::new(&config.worker.python_executable)
             .args(["-m", "venv", abs_main_venv_path.to_str().unwrap()])
             .output()
         {
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
-            Err(e) => warn!("Failed to execute python3 -m venv: {}", e),
+            Err(e) => warn!("Failed to execute {} -m venv: {}", config.worker.python_executable, e),
         }
     } else {
         info!(
@@ -146,11 +146,13 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------------------------------------
     // Queue manager — shared between API (enqueue) and worker pool (dequeue)
     // -------------------------------------------------------------------------
-    let queue_manager = Arc::new(QueueManager::new(
+    let queue_manager = Arc::new(QueueManager::with_config(
         queue_repo.clone(),
         execution_repo.clone(),
         job_repo.clone(),
         config.queue.max_size,
+        config.queue.max_retries,
+        config.queue.retry_delay_seconds,
     ));
 
     // Recover any queued items that survived a previous crash / restart
@@ -177,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         process_manager.clone(),
         execution_repo.clone(),
         execution_log_repo.clone(),
+        job_repo.clone(),
     );
     info!(
         "Worker pool started with {} workers",
@@ -207,6 +210,78 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // -------------------------------------------------------------------------
+    // Retention policy scheduler (F4)
+    // Periodically cleans up old executions, logs, and queue entries.
+    // -------------------------------------------------------------------------
+    {
+        let retention_config = config.retention.clone();
+        let exec_repo_retention = execution_repo.clone();
+        let log_repo_retention = execution_log_repo.clone();
+        let queue_repo_retention = queue_repo.clone();
+
+        let interval_hours = retention_config.cleanup_interval_hours.max(1);
+        let history_days = retention_config.execution_history_days;
+
+        info!(
+            "Retention scheduler started: cleanup every {}h, keep {}d of execution history",
+            interval_hours, history_days
+        );
+
+        tokio::spawn(async move {
+            // Wait a short period before the first cleanup to let the server stabilize
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(interval_hours as u64 * 3600));
+            // The first tick fires immediately, but we already waited 60s above
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                info!("Retention scheduler: starting cleanup cycle");
+
+                // 1. Delete old terminal executions
+                match exec_repo_retention.delete_older_than_days(history_days).await {
+                    Ok(count) if count > 0 => {
+                        info!("Retention: deleted {} old execution(s)", count);
+                    }
+                    Ok(_) => {
+                        info!("Retention: no old executions to clean up");
+                    }
+                    Err(e) => {
+                        error!("Retention: failed to delete old executions: {}", e);
+                    }
+                }
+
+                // 2. Delete orphaned execution logs (whose execution was deleted)
+                match log_repo_retention.delete_orphaned().await {
+                    Ok(count) if count > 0 => {
+                        info!("Retention: deleted {} orphaned execution log(s)", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Retention: failed to delete orphaned logs: {}", e);
+                    }
+                }
+
+                // 3. Clean up old completed/failed queue entries (older than history_days * 24h)
+                let queue_cleanup_hours = (history_days * 24) as i32;
+                match queue_repo_retention.cleanup_old(queue_cleanup_hours).await {
+                    Ok(count) if count > 0 => {
+                        info!("Retention: deleted {} old queue entries", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Retention: failed to clean up queue entries: {}", e);
+                    }
+                }
+
+                info!("Retention scheduler: cleanup cycle complete");
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------------
     // Services
     // -------------------------------------------------------------------------
     let job_service = JobService::new(job_repo.clone());
@@ -227,7 +302,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let package_service =
-        PackageService::with_workers(package_repo.clone(), venv_manager, package_manager_worker);
+        PackageService::with_config(
+            package_repo.clone(),
+            venv_manager,
+            package_manager_worker,
+            config.packages.conflict_resolution.strategy.clone(),
+        );
     let venv_service = VenvService::new(venv_repo.clone());
     let queue_service = QueueService::new(queue_repo.clone());
     let audit_service =

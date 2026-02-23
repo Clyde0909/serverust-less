@@ -118,19 +118,19 @@ const Venvs = {
     
     async viewPackages(venvId) {
         try {
-            const packages = await API.Venvs.packages(venvId);
-            const venv = this.venvs.find(v => v.id === venvId);
-            
-            // Show in a simple alert for now - could be enhanced with a modal
-            const pkgList = packages.map(p => {
-                const name = typeof p === 'string' ? p : p.name;
-                const version = typeof p === 'object' ? p.version : '';
-                return `${name}${version ? ` (${version})` : ''}`;
-            }).join('\n');
-            
-            alert(`Packages in ${venv?.name || venvId}:\n\n${pkgList || '(no packages)'}`);
+            const venv = await API.Venvs.get(venvId);
+            const name = venv.name || venv.id || venvId;
+            const details = [
+                `Type: ${venv.venv_type || 'unknown'}`,
+                `Status: ${venv.status || 'unknown'}`,
+                `Python: ${venv.python_version || 'unknown'}`,
+                `Packages: ${venv.package_count ?? 'unknown'}`,
+                `Path: ${venv.path || 'unknown'}`,
+            ].join('\n');
+
+            alert(`Virtual Environment: ${name}\n\n${details}`);
         } catch (error) {
-            Toast.error('Failed to load packages', error.message);
+            Toast.error('Failed to load venv details', error.message);
         }
     },
     

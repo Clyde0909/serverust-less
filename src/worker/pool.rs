@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::db::{ExecutionLogRepository, ExecutionRepository};
+use crate::db::{ExecutionLogRepository, ExecutionRepository, JobRepository};
 use crate::error::AppError;
 use crate::models::{ExecutionStatus, LogType};
 use crate::queue::QueueManager;
@@ -50,6 +50,7 @@ impl WorkerPool {
         process_manager: Arc<ProcessManager>,
         execution_repo: ExecutionRepository,
         log_repo: ExecutionLogRepository,
+        job_repo: JobRepository,
     ) -> (Self, mpsc::Receiver<WorkerResult>) {
         // Channel sized to accommodate all workers producing results simultaneously.
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>(pool_size * 4);
@@ -61,6 +62,7 @@ impl WorkerPool {
             let pm = process_manager.clone();
             let exec_repo = execution_repo.clone();
             let log_repo = log_repo.clone();
+            let job_repo_ref = job_repo.clone();
             let result_tx = result_tx.clone();
             let runner = runner.clone();
             let main_venv = main_venv_path.clone();
@@ -111,7 +113,7 @@ impl WorkerPool {
                         .await;
 
                     // --- Register with ProcessManager; obtain cancel signal receiver ---
-                    let reg = pm.register(&exec_id, None, worker_id).await;
+                    let reg = pm.register(&exec_id, &job_id, None, worker_id).await;
 
                     // --- PID tracking: report PID to ProcessManager right after spawn ---
                     // This allows process_manager.cancel() to send SIGTERM/SIGKILL while running.
@@ -212,11 +214,30 @@ impl WorkerPool {
                     }
 
                     // --- Update queue entry ---
+                    // For failures, use retry-with-delay logic:
+                    // If retries remain, re-queue after a delay; otherwise move to DLQ.
                     let queue_result =
-                        if matches!(status, ExecutionStatus::Success | ExecutionStatus::Timeout) {
+                        if matches!(status, ExecutionStatus::Success) {
                             qm.mark_completed(&exec_id).await
                         } else {
-                            qm.mark_failed(&exec_id).await
+                            // Get the execution's retry count to decide retry vs DLQ
+                            let retry_count = match exec_repo.get_by_id(&exec_id).await {
+                                Ok(exec) => exec.retry_count,
+                                Err(_) => 0,
+                            };
+                            // Get the job's max_retries setting
+                            let max_retries = match exec_repo.get_by_id(&exec_id).await {
+                                Ok(exec) => {
+                                    match job_repo_ref.get_by_id(&exec.job_id).await {
+                                        Ok(job) => Some(job.max_retries),
+                                        Err(_) => None,
+                                    }
+                                }
+                                Err(_) => None,
+                            };
+                            qm.mark_failed_with_retry(&exec_id, retry_count, max_retries)
+                                .await
+                                .map(|_| ())
                         };
                     if let Err(e) = queue_result {
                         warn!(

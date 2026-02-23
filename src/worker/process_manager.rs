@@ -33,6 +33,8 @@ pub struct ProcessManager {
 struct ProcessInfo {
     /// Process ID (if available)
     pid: Option<u32>,
+    /// Job ID
+    job_id: String,
     /// Worker ID
     worker_id: usize,
     /// Cancellation signal sender
@@ -60,6 +62,7 @@ impl ProcessManager {
     pub async fn register(
         &self,
         execution_id: &str,
+        job_id: &str,
         pid: Option<u32>,
         worker_id: usize,
     ) -> ProcessRegistration {
@@ -67,6 +70,7 @@ impl ProcessManager {
 
         let info = ProcessInfo {
             pid,
+            job_id: job_id.to_string(),
             worker_id,
             cancel_tx,
             started_at: std::time::Instant::now(),
@@ -156,10 +160,32 @@ impl ProcessManager {
         }
     }
 
-    /// Kill a process on Windows
+    /// Kill a process on Windows with graceful shutdown
     #[cfg(windows)]
     async fn kill_process_windows(&self, pid: u32) {
-        // Use taskkill on Windows
+        // First try graceful termination (without /F)
+        info!("Sending graceful termination to process {}", pid);
+        let output = tokio::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .output()
+            .await;
+
+        match output {
+            Ok(out) if out.status.success() => {
+                info!("Process {} terminated gracefully", pid);
+                return;
+            }
+            _ => {
+                debug!("Graceful termination failed for process {}, waiting before force kill", pid);
+            }
+        }
+
+        // Wait for graceful shutdown period
+        let timeout = tokio::time::Duration::from_secs(self.graceful_shutdown_seconds);
+        tokio::time::sleep(timeout).await;
+
+        // Force kill with /F
+        info!("Force killing process {}", pid);
         let output = tokio::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/F"])
             .output()
@@ -167,11 +193,11 @@ impl ProcessManager {
 
         match output {
             Ok(out) if out.status.success() => {
-                info!("Successfully killed process {}", pid);
+                info!("Successfully force-killed process {}", pid);
             }
             Ok(out) => {
                 warn!(
-                    "Failed to kill process {}: {}",
+                    "Failed to force-kill process {}: {}",
                     pid,
                     String::from_utf8_lossy(&out.stderr)
                 );
@@ -211,7 +237,7 @@ impl ProcessManager {
         processes.get(execution_id).map(|info| ProcessHandle {
             pid: info.pid.unwrap_or(0),
             execution_id: execution_id.to_string(),
-            job_id: String::new(), // Would need to store this
+            job_id: info.job_id.clone(),
             worker_id: info.worker_id,
             started_at: info.started_at,
         })
@@ -245,7 +271,7 @@ mod tests {
         let manager = ProcessManager::new(5);
 
         // Register a process
-        let _reg = manager.register("exec-1", Some(1234), 0).await;
+        let _reg = manager.register("exec-1", "job-1", Some(1234), 0).await;
         assert_eq!(manager.running_count().await, 1);
 
         // Unregister
@@ -267,8 +293,8 @@ mod tests {
     async fn test_running_executions() {
         let manager = ProcessManager::new(5);
 
-        let _reg1 = manager.register("exec-1", Some(1234), 0).await;
-        let _reg2 = manager.register("exec-2", Some(5678), 1).await;
+        let _reg1 = manager.register("exec-1", "job-1", Some(1234), 0).await;
+        let _reg2 = manager.register("exec-2", "job-2", Some(5678), 1).await;
 
         let running = manager.running_executions().await;
         assert_eq!(running.len(), 2);
@@ -280,7 +306,7 @@ mod tests {
     async fn test_update_pid() {
         let manager = ProcessManager::new(5);
 
-        let _reg = manager.register("exec-1", None, 0).await;
+        let _reg = manager.register("exec-1", "job-1", None, 0).await;
         manager.update_pid("exec-1", 9999).await;
 
         let info = manager.get_info("exec-1").await;

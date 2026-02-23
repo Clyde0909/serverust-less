@@ -164,6 +164,24 @@ const JobsAPI = {
             body: options,
         });
     },
+
+    /**
+     * Enable a job
+     */
+    async enable(id) {
+        return request(`/jobs/${id}/enable`, {
+            method: 'POST',
+        });
+    },
+
+    /**
+     * Disable a job
+     */
+    async disable(id) {
+        return request(`/jobs/${id}/disable`, {
+            method: 'POST',
+        });
+    },
 };
 
 // ===== Executions API =====
@@ -197,7 +215,35 @@ const ExecutionsAPI = {
             method: 'POST',
         });
     },
-    
+
+    /**
+     * Retry a failed execution
+     */
+    async retry(id) {
+        return request(`/executions/${id}/retry`, {
+            method: 'POST',
+        });
+    },
+
+    /**
+     * Delete an execution record
+     */
+    async delete(id) {
+        return request(`/executions/${id}`, {
+            method: 'DELETE',
+        });
+    },
+
+    /**
+     * Bulk delete executions
+     */
+    async bulkDelete(ids) {
+        return request('/executions/bulk', {
+            method: 'DELETE',
+            body: { ids },
+        });
+    },
+
     /**
      * Get execution logs
      */
@@ -227,25 +273,6 @@ const QueueAPI = {
      */
     async status() {
         return request('/queue/status');
-    },
-    
-    /**
-     * Get pending queue items
-     */
-    async pending(params = {}) {
-        const query = new URLSearchParams();
-        if (params.limit) query.set('limit', params.limit);
-        const queryStr = query.toString();
-        return request(`/queue/pending${queryStr ? '?' + queryStr : ''}`);
-    },
-    
-    /**
-     * Clear the queue
-     */
-    async clear() {
-        return request('/queue/clear', {
-            method: 'POST',
-        });
     },
 };
 
@@ -285,12 +312,12 @@ const PackagesAPI = {
     async search(query) {
         return request(`/packages/search?q=${encodeURIComponent(query)}`);
     },
-    
+
     /**
-     * Get package cache status
+     * Get main venv package list and status
      */
-    async cacheStatus() {
-        return request('/packages/cache');
+    async mainVenvStatus() {
+        return request('/packages/main-venv');
     },
 };
 
@@ -303,31 +330,14 @@ const VenvsAPI = {
     async list() {
         return request('/venvs');
     },
-    
+
     /**
-     * Get a specific venv
+     * Get a specific venv (includes venv details)
      */
     async get(id) {
         return request(`/venvs/${id}`);
     },
-    
-    /**
-     * List packages in a venv
-     */
-    async packages(id) {
-        return request(`/venvs/${id}/packages`);
-    },
-    
-    /**
-     * Install package in a venv
-     */
-    async installPackage(id, name, version = null) {
-        return request(`/venvs/${id}/packages`, {
-            method: 'POST',
-            body: { name, version },
-        });
-    },
-    
+
     /**
      * Delete a venv
      */
@@ -346,6 +356,20 @@ const HealthAPI = {
      */
     async check() {
         return request('/health');
+    },
+
+    /**
+     * Get system statistics
+     */
+    async stats() {
+        return request('/stats');
+    },
+
+    /**
+     * Get worker pool status
+     */
+    async workers() {
+        return request('/workers/status');
     },
 };
 

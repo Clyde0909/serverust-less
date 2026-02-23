@@ -99,6 +99,32 @@ pub struct UpdateJobRequest {
     pub enabled: Option<bool>,
 }
 
+/// Request body for bulk delete operations
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct BulkDeleteRequest {
+    /// List of IDs to delete
+    pub ids: Vec<String>,
+}
+
+/// Response for bulk operations
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BulkOperationResponse {
+    /// Number of items successfully processed
+    pub success_count: u64,
+    /// Number of items that failed
+    pub failure_count: u64,
+    /// Error messages for failed items
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// Request to clone a job
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CloneJobRequest {
+    /// Optional new name for the cloned job (defaults to "{original_name} (copy)")
+    pub name: Option<String>,
+}
+
 /// Query parameters for listing jobs
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct ListJobsQuery {
@@ -191,8 +217,8 @@ impl CreateJobRequest {
         if self.name.trim().is_empty() {
             return Err("Job name cannot be empty".to_string());
         }
-        if self.name.len() > 255 {
-            return Err("Job name cannot exceed 255 characters".to_string());
+        if self.name.len() > 100 {
+            return Err("Job name cannot exceed 100 characters".to_string());
         }
         if self.python_code.trim().is_empty() {
             return Err("Python code cannot be empty".to_string());

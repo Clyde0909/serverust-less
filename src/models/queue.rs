@@ -14,6 +14,7 @@ pub enum QueueStatus {
     Processing,
     Completed,
     Failed,
+    DeadLetter,
 }
 
 impl QueueStatus {
@@ -23,6 +24,7 @@ impl QueueStatus {
             QueueStatus::Processing => "processing",
             QueueStatus::Completed => "completed",
             QueueStatus::Failed => "failed",
+            QueueStatus::DeadLetter => "dead_letter",
         }
     }
 
@@ -32,6 +34,7 @@ impl QueueStatus {
             "processing" => Some(QueueStatus::Processing),
             "completed" => Some(QueueStatus::Completed),
             "failed" => Some(QueueStatus::Failed),
+            "dead_letter" => Some(QueueStatus::DeadLetter),
             _ => None,
         }
     }
@@ -69,6 +72,8 @@ pub struct QueueStatusResponse {
     pub completed_last_hour: i64,
     /// Items failed in last hour
     pub failed_last_hour: i64,
+    /// Items in dead letter queue
+    pub dead_letter_count: i64,
     /// Queue depth by priority
     pub by_priority: Vec<PriorityCount>,
     /// In-memory queue size
@@ -137,6 +142,12 @@ impl QueueEntry {
         self.status = QueueStatus::Failed.as_str().to_string();
         self.completed_at = Some(Utc::now().to_rfc3339());
     }
+
+    /// Mark as dead letter (permanently failed after max retries)
+    pub fn mark_dead_letter(&mut self) {
+        self.status = QueueStatus::DeadLetter.as_str().to_string();
+        self.completed_at = Some(Utc::now().to_rfc3339());
+    }
 }
 
 impl QueueItem {
@@ -166,8 +177,10 @@ impl QueueItem {
 
 impl Ord for QueueItem {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Higher priority first - in a max-heap, larger values pop first
-        self.priority.cmp(&other.priority)
+        // Higher priority first, then by execution_id for deterministic ordering
+        self.priority
+            .cmp(&other.priority)
+            .then_with(|| self.execution_id.cmp(&other.execution_id))
     }
 }
 
@@ -179,7 +192,8 @@ impl PartialOrd for QueueItem {
 
 impl PartialEq for QueueItem {
     fn eq(&self, other: &Self) -> bool {
-        self.execution_id == other.execution_id
+        // Must be consistent with Ord: equal iff same priority AND same execution_id
+        self.priority == other.priority && self.execution_id == other.execution_id
     }
 }
 

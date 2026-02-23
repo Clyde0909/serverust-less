@@ -18,6 +18,8 @@ pub struct PackageService {
     repo: PackageRepository,
     venv_manager: Option<Arc<VenvManager>>,
     package_manager: Option<Arc<PackageManager>>,
+    /// Conflict resolution strategy: "suggest_custom_venv", "force_upgrade", or "fail"
+    conflict_strategy: String,
 }
 
 impl PackageService {
@@ -27,6 +29,7 @@ impl PackageService {
             repo,
             venv_manager: None,
             package_manager: None,
+            conflict_strategy: "suggest_custom_venv".to_string(),
         }
     }
 
@@ -40,6 +43,22 @@ impl PackageService {
             repo,
             venv_manager: Some(venv_manager),
             package_manager: Some(package_manager),
+            conflict_strategy: "suggest_custom_venv".to_string(),
+        }
+    }
+
+    /// Create a new PackageService with worker integration and conflict resolution config
+    pub fn with_config(
+        repo: PackageRepository,
+        venv_manager: Arc<VenvManager>,
+        package_manager: Arc<PackageManager>,
+        conflict_strategy: String,
+    ) -> Self {
+        Self {
+            repo,
+            venv_manager: Some(venv_manager),
+            package_manager: Some(package_manager),
+            conflict_strategy,
         }
     }
 
@@ -68,6 +87,50 @@ impl PackageService {
                 ));
             }
         };
+
+        // --- Conflict detection (F3) ---
+        // Check if a different version of this package is already installed in main venv
+        if let Some(ref requested_version) = req.version {
+            if let Ok(Some(existing)) = self.repo.get_cached_package("main", None, &req.name).await {
+                if existing.status == PackageStatus::Ready.as_str()
+                    && existing.version != *requested_version
+                    && requested_version != "*"
+                {
+                    warn!(
+                        "Package conflict: {} is installed at v{} but v{} requested (strategy: {})",
+                        req.name, existing.version, requested_version, self.conflict_strategy
+                    );
+
+                    match self.conflict_strategy.as_str() {
+                        "fail" => {
+                            return Err(AppError::Validation(format!(
+                                "Package conflict: {} v{} is already installed in main-venv. \
+                                 Requested v{}. Use a custom venv or change the conflict resolution strategy.",
+                                req.name, existing.version, requested_version
+                            )));
+                        }
+                        "suggest_custom_venv" => {
+                            // Allow the install but log a warning — the API response indicates
+                            // the conflict via the returned cache entry. In a more sophisticated
+                            // implementation this would return a structured warning, but for now
+                            // we log and proceed with the upgrade (same as force_upgrade behavior
+                            // but with an explicit warning).
+                            warn!(
+                                "Conflict detected for {}: consider using a custom venv. \
+                                 Proceeding with upgrade from v{} to v{}.",
+                                req.name, existing.version, requested_version
+                            );
+                        }
+                        "force_upgrade" | _ => {
+                            info!(
+                                "Force upgrading {} from v{} to v{}",
+                                req.name, existing.version, requested_version
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Get main venv path
         let main_venv_path = venv_manager.main_venv_path();
@@ -189,7 +252,7 @@ impl PackageService {
 
         info!("Uninstalling package: {}", package_name);
         let result = package_manager
-            .uninstall_package(&main_venv_path, package_name)
+            .uninstall_from_main_venv(&main_venv_path, package_name)
             .await;
 
         if !result.success {

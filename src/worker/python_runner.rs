@@ -500,10 +500,48 @@ INPUT_DATA = json.loads('''{}''')
             code.to_string()
         };
 
-        // Spawn the Python process
-        let mut cmd = Command::new(&python_path);
-        cmd.arg("-c")
-            .arg(&full_code)
+        let chosen_python_path = if python_path.exists() {
+            python_path
+        } else {
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found — falling back to configured executable."
+            );
+            std::path::PathBuf::from(&self.python_executable)
+        };
+
+        // Build command with resource limits (same as spawn_with_limits)
+        #[cfg(unix)]
+        let cmd_setup = self
+            .create_limited_command_unix(&chosen_python_path, &full_code, memory_limit_mb)
+            .await;
+        #[cfg(unix)]
+        let (cmd_path, cmd_args, _temp_script) = match cmd_setup {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to build limited command: {}", e);
+                return ExecutionResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("Failed to build limited command: {}", e),
+                    exit_code: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    timed_out: false,
+                    memory_exceeded: false,
+                };
+            }
+        };
+
+        #[cfg(not(unix))]
+        let (cmd_path, cmd_args, _temp_script) = (
+            chosen_python_path.clone(),
+            vec!["-c".to_string(), full_code.clone()],
+            None::<tempfile::NamedTempFile>,
+        );
+
+        // Spawn the Python process with memory limits applied
+        let mut cmd = Command::new(&cmd_path);
+        cmd.args(&cmd_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

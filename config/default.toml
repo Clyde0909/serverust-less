@@ -1,7 +1,7 @@
 # Server configuration
 [server]
 host = "127.0.0.1"
-port = 3000
+port = 8080
 log_level = "info"
 
 # Database configuration
@@ -14,3 +14,33 @@ max_connections = 10
 pool_size = 4
 default_timeout_seconds = 30
 default_memory_limit_mb = 128
+python_executable = "python3"
+graceful_shutdown_seconds = 30
+
+# Queue configuration
+[queue]
+max_size = 1000
+persistence_enabled = true
+retry_delay_seconds = 5
+max_retries = 3
+
+# Package management
+[packages]
+main_venv_path = "./venvs/main"
+custom_venv_base_path = "./venvs"
+pip_cache_dir = "./cache/pip"
+max_cache_size_mb = 5000
+max_custom_venvs = 50
+pip_timeout_seconds = 300
+
+# Data retention
+[retention]
+execution_history_days = 30
+log_max_size_bytes = 1048576
+cleanup_interval_hours = 24
+
+# Security
+[security]
+enable_auth = false
+enable_multitenancy = false
+enable_audit_log = true

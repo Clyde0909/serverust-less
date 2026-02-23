@@ -256,4 +256,14 @@ impl ExecutionService {
     pub async fn get_running_executions(&self) -> Result<Vec<Execution>, AppError> {
         self.execution_repo.get_running().await
     }
+
+    /// Count total executions (efficient)
+    pub async fn count_all(&self) -> Result<i64, AppError> {
+        self.execution_repo.count_all().await
+    }
+
+    /// Count running executions (efficient)
+    pub async fn count_running(&self) -> Result<i64, AppError> {
+        self.execution_repo.count_running().await
+    }
 }

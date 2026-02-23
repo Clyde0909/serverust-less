@@ -50,10 +50,14 @@ pub struct AppState {
         jobs::delete_job,
         jobs::enable_job,
         jobs::disable_job,
+        jobs::bulk_create_jobs,
+        jobs::bulk_delete_jobs,
+        jobs::clone_job,
         // Executions
         executions::list_executions,
         executions::get_execution,
         executions::delete_execution,
+        executions::bulk_delete_executions,
         executions::get_execution_logs,
         executions::stream_execution_logs,
         executions::cancel_execution,
@@ -65,17 +69,23 @@ pub struct AppState {
         packages::install_package,
         packages::uninstall_package,
         packages::get_main_venv_packages,
+        packages::update_main_venv_packages,
+        packages::clear_main_venv,
         packages::delete_package,
         packages::get_job_dependencies,
         packages::add_job_dependency,
         packages::update_dependency,
         packages::remove_dependency,
         packages::get_dependency_status,
+        packages::install_job_dependencies,
+        packages::search_pypi,
         // Venvs
         venvs::list_venvs,
         venvs::get_venv,
         venvs::delete_venv,
         venvs::get_job_venv_info,
+        venvs::toggle_job_venv,
+        venvs::delete_job_venv,
         // Queue
         queue::get_queue_status,
         // Health
@@ -91,6 +101,9 @@ pub struct AppState {
             crate::models::UpdateJobRequest,
             crate::models::ListJobsQuery,
             crate::models::JobListResponse,
+            crate::models::BulkDeleteRequest,
+            crate::models::BulkOperationResponse,
+            crate::models::CloneJobRequest,
             // Execution schemas
             crate::models::Execution,
             crate::models::ExecuteJobRequest,
@@ -117,6 +130,10 @@ pub struct AppState {
             // Health schemas
             health::HealthResponse,
             health::StatsResponse,
+            health::WorkerStatusResponse,
+            // Package search schemas
+            packages::SearchResponse,
+            packages::PyPiSearchResult,
             // Error schemas
             crate::error::ErrorResponse,
         )
@@ -161,6 +178,9 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .nest("/api/v1", api_routes)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .route("/api/openapi.json", axum::routing::get(|| async {
+            axum::Json(ApiDoc::openapi())
+        }))
         .nest_service("/css", ServeDir::new("web/css"))
         .nest_service("/js", ServeDir::new("web/js"))
         .fallback_service(static_files)
