@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::{Execution, ExecutionStatus, QueueItem};
+use crate::models::QueueItem;
 use crate::worker::python_runner::{ExecutionResult, PythonRunner};
 
 /// Job executor handles the execution of a single job
@@ -38,10 +38,7 @@ impl JobExecutor {
 
     /// Execute a queued item
     pub async fn execute(&self, item: &QueueItem) -> ExecutionResult {
-        // Determine which venv to use
         let venv_path = self.get_venv_path(item);
-
-        // Execute the Python code
         self.runner
             .execute(
                 &venv_path,
@@ -53,7 +50,28 @@ impl JobExecutor {
             .await
     }
 
-    /// Create execution result from runner result
+    /// Execute a queued item, sending the child PID via `pid_tx` right after spawn.
+    /// Use this variant when cancellation support is required.
+    pub async fn execute_with_pid(
+        &self,
+        item: &QueueItem,
+        pid_tx: tokio::sync::oneshot::Sender<u32>,
+    ) -> ExecutionResult {
+        let venv_path = self.get_venv_path(item);
+        self.runner
+            .execute_with_pid(
+                &venv_path,
+                &item.python_code,
+                item.input_data.as_deref(),
+                item.timeout_seconds as u64,
+                item.memory_limit_mb as u64,
+                pid_tx,
+            )
+            .await
+    }
+
+    /// Create execution result from runner result (test-only helper)
+    #[cfg(test)]
     pub fn create_execution_result(
         &self,
         mut execution: Execution,
@@ -81,6 +99,7 @@ impl JobExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Execution;
 
     fn create_test_queue_item(use_custom_venv: bool) -> QueueItem {
         QueueItem::new(

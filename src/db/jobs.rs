@@ -216,4 +216,45 @@ impl JobRepository {
 
         Ok(count > 0)
     }
+
+    /// Delete multiple jobs by IDs
+    pub async fn delete_bulk(&self, ids: &[String]) -> Result<u64, AppError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            "DELETE FROM jobs WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut qb = sqlx::query(&query);
+        for id in ids {
+            qb = qb.bind(id);
+        }
+
+        let result = qb
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Count total jobs (efficient single-value query)
+    pub async fn count_all(&self) -> Result<i64, AppError> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM jobs")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Count enabled jobs
+    pub async fn count_enabled(&self) -> Result<i64, AppError> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM jobs WHERE enabled = 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
 }

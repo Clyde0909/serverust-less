@@ -8,7 +8,7 @@ pub mod python_runner;
 pub mod venv_manager;
 
 pub use executor::JobExecutor;
-pub use package_manager::PackageManager;
+pub use package_manager::{InstallResult, PackageManager};
 pub use pool::WorkerPool;
 pub use process_manager::ProcessManager;
 pub use python_runner::PythonRunner;

@@ -152,6 +152,65 @@ impl JobService {
         };
         self.update_job(id, update).await
     }
+
+    /// Bulk create jobs
+    pub async fn bulk_create_jobs(&self, requests: Vec<CreateJobRequest>) -> Result<(Vec<Job>, Vec<String>), AppError> {
+        let mut jobs = Vec::new();
+        let mut errors = Vec::new();
+
+        for req in requests {
+            match self.create_job(req).await {
+                Ok(job) => jobs.push(job),
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+
+        Ok((jobs, errors))
+    }
+
+    /// Bulk delete jobs
+    pub async fn bulk_delete_jobs(&self, ids: Vec<String>) -> Result<u64, AppError> {
+        self.repo.delete_bulk(&ids).await
+    }
+
+    /// Clone a job with a new name
+    pub async fn clone_job(&self, id: &str, new_name: Option<String>) -> Result<Job, AppError> {
+        let source = self.repo.get_by_id(id).await?;
+
+        let cloned_name = new_name.unwrap_or_else(|| format!("{} (copy)", source.name));
+
+        // Check for duplicate name
+        if self.repo.name_exists(&cloned_name, None).await? {
+            return Err(AppError::Conflict(format!(
+                "Job with name '{}' already exists",
+                cloned_name
+            )));
+        }
+
+        let req = CreateJobRequest {
+            name: cloned_name,
+            description: source.description,
+            python_code: source.python_code,
+            timeout_seconds: source.timeout_seconds,
+            memory_limit_mb: source.memory_limit_mb,
+            use_custom_venv: source.use_custom_venv,
+            priority: source.priority,
+            max_retries: source.max_retries,
+        };
+
+        let job = Job::new(req);
+        self.repo.create(&job).await
+    }
+
+    /// Count total jobs (efficient)
+    pub async fn count_all(&self) -> Result<i64, AppError> {
+        self.repo.count_all().await
+    }
+
+    /// Count enabled jobs (efficient)
+    pub async fn count_enabled(&self) -> Result<i64, AppError> {
+        self.repo.count_enabled().await
+    }
 }
 
 /// Format validation errors into a readable string

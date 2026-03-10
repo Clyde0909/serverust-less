@@ -87,17 +87,23 @@ INPUT_DATA = json.loads('''{}''')
             "Executing Python code"
         );
 
-        // Choose python executable: prefer venv's python, fall back to configured python_executable
+        // Choose python executable: prefer venv's python, fall back only if no venv path given.
+        // Using an absolute path avoids silent fallback to system Python when the relative
+        // ./venvs/main/bin/python check fails due to a different process CWD.
         let chosen_python_path = if python_path.exists() {
             python_path
         } else {
-            debug!(path = %python_path.display(), "venv python not found, falling back to configured python");
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found at expected path — falling back to configured executable. \
+                 Packages installed in the venv will NOT be available."
+            );
             std::path::PathBuf::from(&self.python_executable)
         };
 
         // Build the command with resource limits
         let result = self
-            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb)
+            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb, None)
             .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -141,13 +147,17 @@ INPUT_DATA = json.loads('''{}''')
         }
     }
 
-    /// Spawn Python process with resource limits
+    /// Spawn Python process with resource limits.
+    /// If `pid_tx` is provided the child's OS PID is sent through it immediately
+    /// after a successful `spawn()`, before the process is awaited.  This lets
+    /// the caller register the PID for cancellation while the job is running.
     async fn spawn_with_limits(
         &self,
         python_path: &Path,
         code: &str,
         timeout_seconds: u64,
         memory_limit_mb: u64,
+        pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
     ) -> Result<ExecutionResult, String> {
         debug!(
             python = %python_path.display(),
@@ -188,6 +198,13 @@ INPUT_DATA = json.loads('''{}''')
                 return Err(format!("Failed to spawn Python process: {}", e));
             }
         };
+
+        // Report PID immediately so ProcessManager can send SIGTERM/SIGKILL on cancel.
+        if let Some(tx) = pid_tx {
+            if let Some(pid) = child.id() {
+                let _ = tx.send(pid);
+            }
+        }
 
         // Capture stdout and stderr
         let stdout_handle = child.stdout.take();
@@ -348,6 +365,99 @@ INPUT_DATA = json.loads('''{}''')
         }
     }
 
+    /// Execute Python code, sending the child process PID through `pid_tx`
+    /// immediately after spawn so the caller can arrange cancellation.
+    pub async fn execute_with_pid(
+        &self,
+        venv_path: &Path,
+        code: &str,
+        input_data: Option<&str>,
+        timeout_seconds: u64,
+        memory_limit_mb: u64,
+        pid_tx: tokio::sync::oneshot::Sender<u32>,
+    ) -> ExecutionResult {
+        let start = std::time::Instant::now();
+
+        let python_path = if cfg!(windows) {
+            venv_path.join("Scripts").join("python.exe")
+        } else {
+            venv_path.join("bin").join("python")
+        };
+
+        let full_code = if let Some(input) = input_data {
+            format!(
+                r#"
+import json
+import sys
+
+# Input data
+INPUT_DATA = json.loads('''{inp}''')
+
+# User code
+{code}
+"#,
+                inp = input.replace("'''", r"\'\'\'" ),
+                code = code
+            )
+        } else {
+            code.to_string()
+        };
+
+        let chosen_python_path = if python_path.exists() {
+            python_path
+        } else {
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found at expected path — falling back to configured executable. \
+                 Packages installed in the venv will NOT be available."
+            );
+            std::path::PathBuf::from(&self.python_executable)
+        };
+
+        let result = self
+            .spawn_with_limits(
+                &chosen_python_path,
+                &full_code,
+                timeout_seconds,
+                memory_limit_mb,
+                Some(pid_tx),
+            )
+            .await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(exec_result) => {
+                if exec_result.success {
+                    info!(duration_ms, "Python execution (tracked) succeeded");
+                } else {
+                    warn!(
+                        duration_ms,
+                        timed_out = exec_result.timed_out,
+                        memory_exceeded = exec_result.memory_exceeded,
+                        "Python execution (tracked) failed"
+                    );
+                }
+                ExecutionResult {
+                    duration_ms,
+                    ..exec_result
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Python execution error");
+                ExecutionResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: e,
+                    exit_code: None,
+                    duration_ms,
+                    timed_out: false,
+                    memory_exceeded: false,
+                }
+            }
+        }
+    }
+
     /// Execute Python code and stream output in real-time
     pub async fn execute_streaming<F>(
         &self,
@@ -390,10 +500,48 @@ INPUT_DATA = json.loads('''{}''')
             code.to_string()
         };
 
-        // Spawn the Python process
-        let mut cmd = Command::new(&python_path);
-        cmd.arg("-c")
-            .arg(&full_code)
+        let chosen_python_path = if python_path.exists() {
+            python_path
+        } else {
+            warn!(
+                path = %python_path.display(),
+                "Venv Python not found — falling back to configured executable."
+            );
+            std::path::PathBuf::from(&self.python_executable)
+        };
+
+        // Build command with resource limits (same as spawn_with_limits)
+        #[cfg(unix)]
+        let cmd_setup = self
+            .create_limited_command_unix(&chosen_python_path, &full_code, memory_limit_mb)
+            .await;
+        #[cfg(unix)]
+        let (cmd_path, cmd_args, _temp_script) = match cmd_setup {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to build limited command: {}", e);
+                return ExecutionResult {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: format!("Failed to build limited command: {}", e),
+                    exit_code: None,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    timed_out: false,
+                    memory_exceeded: false,
+                };
+            }
+        };
+
+        #[cfg(not(unix))]
+        let (cmd_path, cmd_args, _temp_script) = (
+            chosen_python_path.clone(),
+            vec!["-c".to_string(), full_code.clone()],
+            None::<tempfile::NamedTempFile>,
+        );
+
+        // Spawn the Python process with memory limits applied
+        let mut cmd = Command::new(&cmd_path);
+        cmd.args(&cmd_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);

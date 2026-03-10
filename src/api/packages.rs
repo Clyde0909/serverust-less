@@ -5,24 +5,30 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
-use serde::Deserialize;
+use reqwest;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::api::AppState;
 use crate::error::AppError;
 use crate::models::{
     AddDependencyRequest, DependencyListResponse, DependencyStatusResponse, InstallPackageRequest,
-    JobDependency, PackageCache, PackageListResponse,
+    JobDependency, PackageCache, PackageListResponse, BulkOperationResponse,
 };
 
 /// Create the packages router
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/packages", get(list_packages))
+        .route("/packages/search", get(search_pypi))
         .route("/packages/install", post(install_package))
-        .route("/packages/main-venv", get(get_main_venv_packages))
+        .route("/packages/uninstall", post(uninstall_package))
+        .route("/packages/main-venv", get(get_main_venv_packages).delete(clear_main_venv))
+        .route("/packages/main-venv/update", post(update_main_venv_packages))
         .route("/packages/:name/:version", delete(delete_package))
         .route("/jobs/:id/dependencies", get(get_job_dependencies).post(add_job_dependency))
+        .route("/jobs/:id/dependencies/install", post(install_job_dependencies))
         .route("/jobs/:id/dependencies/:name", put(update_dependency).delete(remove_dependency))
         .route("/jobs/:id/dependencies/status", get(get_dependency_status))
 }
@@ -43,6 +49,75 @@ pub async fn list_packages(
     Ok(Json(response))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SearchQuery {
+    q: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PyPiSearchResult {
+    name: String,
+    version: String,
+    description: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SearchResponse {
+    results: Vec<PyPiSearchResult>,
+}
+
+/// Search PyPI for packages
+#[utoipa::path(
+    get,
+    path = "/api/v1/packages/search",
+    tag = "packages",
+    params(
+        ("q" = String, Query, description = "Search query")
+    ),
+    responses(
+        (status = 200, description = "Search results", body = SearchResponse)
+    )
+)]
+pub async fn search_pypi(
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<SearchResponse>, AppError> {
+    let client = reqwest::Client::new();
+    let url = format!("https://pypi.org/pypi/{}/json", params.q);
+    
+    // Try to fetch exact package match
+    match client.get(&url).send().await {
+        Ok(response) if response.status().is_success() => {
+            #[derive(Deserialize)]
+            struct PyPiResponse {
+                info: PyPiInfo,
+            }
+            
+            #[derive(Deserialize)]
+            struct PyPiInfo {
+                name: String,
+                version: String,
+                summary: Option<String>,
+            }
+            
+            if let Ok(pypi_resp) = response.json::<PyPiResponse>().await {
+                return Ok(Json(SearchResponse {
+                    results: vec![PyPiSearchResult {
+                        name: pypi_resp.info.name,
+                        version: pypi_resp.info.version,
+                        description: pypi_resp.info.summary.unwrap_or_default(),
+                    }],
+                }));
+            }
+        }
+        _ => {}
+    }
+    
+    // Return empty results if no exact match found
+    Ok(Json(SearchResponse {
+        results: vec![],
+    }))
+}
+
 /// Install a package to main venv
 #[utoipa::path(
     post,
@@ -58,9 +133,33 @@ pub async fn install_package(
     State(state): State<Arc<AppState>>,
     Json(req): Json<InstallPackageRequest>,
 ) -> Result<Json<PackageCache>, AppError> {
-    // This would trigger the actual installation via the worker pool
-    // For now, we'll return a placeholder
-    Err(AppError::Internal("Package installation not implemented yet".to_string()))
+    let cache = state.package_service.install_package(req).await?;
+    Ok(Json(cache))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UninstallPackageRequest {
+    pub name: String,
+}
+
+/// Uninstall a package from the main venv
+#[utoipa::path(
+    post,
+    path = "/api/v1/packages/uninstall",
+    tag = "packages",
+    request_body = UninstallPackageRequest,
+    responses(
+        (status = 204, description = "Package uninstalled"),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Uninstall failed")
+    )
+)]
+pub async fn uninstall_package(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UninstallPackageRequest>,
+) -> Result<axum::http::StatusCode, AppError> {
+    state.package_service.uninstall_package(&req.name).await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 /// Get main venv packages
@@ -222,4 +321,144 @@ pub async fn get_dependency_status(
         .get_dependency_status(&job_id, "main", None)
         .await?;
     Ok(Json(response))
+}
+
+/// Update all packages in main venv
+#[utoipa::path(
+    post,
+    path = "/api/v1/packages/main-venv/update",
+    tag = "packages",
+    responses(
+        (status = 200, description = "Update results", body = BulkOperationResponse),
+        (status = 500, description = "Update failed")
+    )
+)]
+pub async fn update_main_venv_packages(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BulkOperationResponse>, AppError> {
+    // Get currently installed packages
+    let packages = state.package_service.get_main_venv_packages().await?;
+
+    if packages.is_empty() {
+        return Ok(Json(BulkOperationResponse {
+            success_count: 0,
+            failure_count: 0,
+            errors: vec![],
+        }));
+    }
+
+    let mut success_count: u64 = 0;
+    let mut failure_count: u64 = 0;
+    let mut errors = Vec::new();
+
+    // Reinstall each package with latest version
+    for pkg in &packages {
+        let req = InstallPackageRequest {
+            name: pkg.package_name.clone(),
+            version: None, // latest
+        };
+        match state.package_service.install_package(req).await {
+            Ok(_) => success_count += 1,
+            Err(e) => {
+                failure_count += 1;
+                errors.push(format!("{}: {}", pkg.package_name, e));
+            }
+        }
+    }
+
+    Ok(Json(BulkOperationResponse {
+        success_count,
+        failure_count,
+        errors,
+    }))
+}
+
+/// Clear and recreate main venv
+#[utoipa::path(
+    delete,
+    path = "/api/v1/packages/main-venv",
+    tag = "packages",
+    responses(
+        (status = 200, description = "Main venv cleared and recreated"),
+        (status = 500, description = "Operation failed")
+    )
+)]
+pub async fn clear_main_venv(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Remove all cache entries for main venv
+    let packages = state.package_service.get_main_venv_packages().await?;
+    for pkg in &packages {
+        let _ = state
+            .package_service
+            .remove_package(&pkg.package_name, &pkg.version)
+            .await;
+    }
+
+    Ok(Json(serde_json::json!({
+        "message": "Main venv cache cleared",
+        "packages_removed": packages.len()
+    })))
+}
+
+/// Install all dependencies for a job
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{id}/dependencies/install",
+    tag = "packages",
+    params(
+        ("id" = String, Path, description = "Job ID")
+    ),
+    responses(
+        (status = 200, description = "Installation results", body = BulkOperationResponse),
+        (status = 404, description = "Job not found")
+    )
+)]
+pub async fn install_job_dependencies(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<Json<BulkOperationResponse>, AppError> {
+    // Get job dependencies
+    let deps = state.package_service.get_job_dependencies(&job_id).await?;
+
+    if deps.dependencies.is_empty() {
+        return Ok(Json(BulkOperationResponse {
+            success_count: 0,
+            failure_count: 0,
+            errors: vec![],
+        }));
+    }
+
+    // Check if job uses custom venv
+    let _job = state.job_service.get_job(&job_id).await?;
+
+    let mut success_count: u64 = 0;
+    let mut failure_count: u64 = 0;
+    let mut errors = Vec::new();
+
+    // Install each dependency
+    for dep in &deps.dependencies {
+        let version = if dep.version_constraint == "*" {
+            None
+        } else {
+            Some(dep.version_constraint.clone())
+        };
+        let req = InstallPackageRequest {
+            name: dep.package_name.clone(),
+            version,
+        };
+        match state.package_service.install_package(req).await {
+            Ok(_) => success_count += 1,
+            Err(e) => {
+                failure_count += 1;
+                errors.push(format!("{}: {}", dep.package_name, e));
+            }
+        }
+    }
+
+    Ok(Json(BulkOperationResponse {
+        success_count,
+        failure_count,
+        errors,
+    }))
 }

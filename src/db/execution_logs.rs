@@ -180,4 +180,20 @@ impl ExecutionLogRepository {
         let logs = logs.map_err(|e| AppError::Database(e.to_string()))?;
         Ok((logs, total))
     }
+
+    /// Delete orphaned execution logs whose parent execution no longer exists.
+    /// This is called after execution cleanup to remove stale log entries.
+    pub async fn delete_orphaned(&self) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM execution_logs
+            WHERE execution_id NOT IN (SELECT id FROM executions)
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(result.rows_affected())
+    }
 }

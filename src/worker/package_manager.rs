@@ -74,7 +74,17 @@ impl PackageManager {
 
         // Build the package spec
         let package_spec = match version_constraint {
-            Some(constraint) if constraint != "*" => format!("{}{}", package_name, constraint),
+            Some(constraint) if constraint != "*" => {
+                // If constraint doesn't start with an operator, default to ==
+                if constraint.starts_with("==") || constraint.starts_with(">=") 
+                   || constraint.starts_with("<=") || constraint.starts_with(">") 
+                   || constraint.starts_with("<") || constraint.starts_with("~=") 
+                   || constraint.starts_with("!=") {
+                    format!("{}{}", package_name, constraint)
+                } else {
+                    format!("{}=={}", package_name, constraint)
+                }
+            }
             _ => package_name.to_string(),
         };
 
@@ -151,7 +161,13 @@ impl PackageManager {
         }
     }
 
-    /// Uninstall a package
+    /// Uninstall a package from the main venv (with locking)
+    pub async fn uninstall_from_main_venv(&self, venv_path: &Path, package_name: &str) -> InstallResult {
+        let _lock = self.main_venv_lock.lock().await;
+        self.uninstall_package(venv_path, package_name).await
+    }
+
+    /// Uninstall a package (no locking — use `uninstall_from_main_venv` for shared venvs)
     pub async fn uninstall_package(&self, venv_path: &Path, package_name: &str) -> InstallResult {
         let pip_path = self.get_pip_path(venv_path);
 

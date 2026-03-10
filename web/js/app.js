@@ -252,6 +252,43 @@ function setupEventListeners() {
         Modal.open('package-modal');
     });
     
+    // Package search input
+    let searchTimeout;
+    document.getElementById('package-search')?.addEventListener('input', async (e) => {
+        const query = e.target.value.trim();
+        
+        // Clear previous timeout
+        if (searchTimeout) {
+            clearTimeout(searchTimeout);
+        }
+        
+        // Don't search if query is too short
+        if (query.length < 2) {
+            return;
+        }
+        
+        // Debounce search by 300ms
+        searchTimeout = setTimeout(async () => {
+            try {
+                const results = await Packages.searchPackages(query);
+                
+                // Show search results as a dropdown or modal
+                if (results && results.length > 0) {
+                    // Pre-fill the install modal with the first result
+                    document.getElementById('pkg-name').value = results[0].name;
+                    if (results[0].version) {
+                        document.getElementById('pkg-version').value = results[0].version;
+                    }
+                    Toast.info('Found', `Package: ${results[0].name} v${results[0].version}`);
+                } else {
+                    Toast.warning('No results', `No package found for "${query}"`);
+                }
+            } catch (error) {
+                console.error('Search failed:', error);
+            }
+        }, 300);
+    });
+    
     // Confirm package install
     document.getElementById('btn-confirm-install')?.addEventListener('click', async () => {
         const name = document.getElementById('pkg-name').value.trim();

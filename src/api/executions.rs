@@ -15,14 +15,15 @@ use tokio_stream::StreamExt;
 use crate::api::AppState;
 use crate::error::AppError;
 use crate::models::{
-    ExecuteJobRequest, Execution, ExecutionListResponse, ExecutionLogsResponse,
-    ListExecutionsQuery, ListLogsQuery,
+    BulkDeleteRequest, BulkOperationResponse, ExecuteJobRequest, Execution,
+    ExecutionListResponse, ExecutionLogsResponse, ListExecutionsQuery, ListLogsQuery, QueueItem,
 };
 
 /// Create the executions router
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/executions", get(list_executions))
+        .route("/executions/bulk", delete(bulk_delete_executions))
         .route("/executions/:id", get(get_execution).delete(delete_execution))
         .route("/executions/:id/logs", get(get_execution_logs))
         .route("/executions/:id/stream", get(stream_execution_logs))
@@ -100,6 +101,34 @@ pub async fn delete_execution(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// Bulk delete executions
+#[utoipa::path(
+    delete,
+    path = "/api/v1/executions/bulk",
+    tag = "executions",
+    request_body = BulkDeleteRequest,
+    responses(
+        (status = 200, description = "Bulk delete results", body = BulkOperationResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse)
+    )
+)]
+pub async fn bulk_delete_executions(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<BulkOperationResponse>, AppError> {
+    if req.ids.is_empty() {
+        return Err(AppError::Validation("No IDs provided".to_string()));
+    }
+
+    let total = req.ids.len() as u64;
+    let deleted = state.execution_service.delete_executions(req.ids).await?;
+    Ok(Json(BulkOperationResponse {
+        success_count: deleted,
+        failure_count: total - deleted,
+        errors: vec![],
+    }))
+}
+
 /// Get execution logs
 #[utoipa::path(
     get,
@@ -142,6 +171,10 @@ pub async fn cancel_execution(
     Path(id): Path<String>,
 ) -> Result<Json<Execution>, AppError> {
     let execution = state.execution_service.cancel_execution(&id).await?;
+    // Also attempt to kill the running process (may be no-op if already finished)
+    let _ = state.process_manager.cancel(&id).await;
+    // Remove from queue if it was pending/queued
+    let _ = state.queue_manager.remove(&id).await;
     Ok(Json(execution))
 }
 
@@ -164,6 +197,25 @@ pub async fn retry_execution(
     Path(id): Path<String>,
 ) -> Result<Json<Execution>, AppError> {
     let execution = state.execution_service.retry_execution(&id).await?;
+
+    // Enqueue the newly created retry execution
+    let job = state.job_service.get_job(&execution.job_id).await?;
+    let item = QueueItem::new(
+        &execution.id,
+        &job.id,
+        job.priority, // use original job priority
+        &job.python_code,
+        job.timeout_seconds,
+        job.memory_limit_mb,
+        execution.input_data.clone(),
+        job.use_custom_venv,
+    );
+    state
+        .queue_manager
+        .enqueue(item)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue retry: {}", e)))?;
+
     Ok(Json(execution))
 }
 
@@ -187,10 +239,30 @@ pub async fn execute_job(
     Path(job_id): Path<String>,
     Json(req): Json<Option<ExecuteJobRequest>>,
 ) -> Result<(axum::http::StatusCode, Json<Execution>), AppError> {
+    let priority = req.as_ref().and_then(|r| r.priority).unwrap_or(0);
     let execution = state
         .execution_service
         .create_execution(&job_id, req)
         .await?;
+
+    // Fetch job details needed to build the QueueItem
+    let job = state.job_service.get_job(&job_id).await?;
+    let item = QueueItem::new(
+        &execution.id,
+        &job.id,
+        priority,
+        &job.python_code,
+        job.timeout_seconds,
+        job.memory_limit_mb,
+        execution.input_data.clone(),
+        job.use_custom_venv,
+    );
+    state
+        .queue_manager
+        .enqueue(item)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to enqueue execution: {}", e)))?;
+
     Ok((axum::http::StatusCode::CREATED, Json(execution)))
 }
 

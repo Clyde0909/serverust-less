@@ -144,6 +144,38 @@ impl QueueRepository {
         Ok(rows)
     }
 
+    /// Reset items stuck in "processing" state back to "queued" (crash recovery).
+    pub async fn reset_processing_to_queued(&self) -> Result<u64, AppError> {
+        let result = sqlx::query(
+            "UPDATE job_queue SET status = 'queued', started_at = NULL WHERE status = 'processing'",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    /// Atomically dequeue the highest-priority item: SELECT + UPDATE in a single statement.
+    /// Prevents double-dequeue under concurrency.
+    pub async fn dequeue_atomic(&self) -> Result<Option<QueueEntry>, AppError> {
+        sqlx::query_as::<_, QueueEntry>(
+            r#"
+            UPDATE job_queue
+            SET status = 'processing', started_at = datetime('now')
+            WHERE id = (
+                SELECT id FROM job_queue
+                WHERE status = 'queued'
+                ORDER BY priority DESC, queued_at ASC
+                LIMIT 1
+            )
+            RETURNING id, execution_id, job_id, priority, status, queued_at, started_at, completed_at
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
     /// Get all queued entries (for recovery)
     pub async fn get_all_queued(&self) -> Result<Vec<QueueEntry>, AppError> {
         sqlx::query_as::<_, QueueEntry>(
@@ -194,5 +226,46 @@ impl QueueRepository {
         .fetch_one(&self.pool)
         .await
         .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Count items in dead letter queue
+    pub async fn count_dead_letter(&self) -> Result<i64, AppError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM job_queue WHERE status = 'dead_letter'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Get all dead letter queue entries
+    pub async fn get_dead_letter_entries(&self) -> Result<Vec<QueueEntry>, AppError> {
+        sqlx::query_as::<_, QueueEntry>(
+            r#"
+            SELECT id, execution_id, job_id, priority, status, queued_at, started_at, completed_at
+            FROM job_queue
+            WHERE status = 'dead_letter'
+            ORDER BY completed_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Re-queue a failed item (reset back to queued status for retry)
+    pub async fn requeue(&self, id: &str) -> Result<(), AppError> {
+        sqlx::query(
+            r#"
+            UPDATE job_queue
+            SET status = 'queued', started_at = NULL, completed_at = NULL
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
     }
 }

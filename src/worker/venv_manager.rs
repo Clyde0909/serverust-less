@@ -61,7 +61,8 @@ impl VenvManager {
     async fn create_venv(&self, path: &Path) -> Result<(), String> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
@@ -88,7 +89,8 @@ impl VenvManager {
     /// Delete a virtual environment
     pub async fn delete_venv(&self, path: &Path) -> Result<(), String> {
         if path.exists() {
-            std::fs::remove_dir_all(path)
+            tokio::fs::remove_dir_all(path)
+                .await
                 .map_err(|e| format!("Failed to delete venv: {}", e))?;
             info!("Deleted virtual environment at {:?}", path);
         }
@@ -119,32 +121,35 @@ impl VenvManager {
         }
     }
 
-    /// Get venv size in bytes
-    pub fn get_venv_size(&self, venv_path: &Path) -> Result<u64, String> {
-        let mut total_size = 0u64;
-
-        fn dir_size(path: &Path) -> std::io::Result<u64> {
-            let mut size = 0;
-            if path.is_dir() {
-                for entry in std::fs::read_dir(path)? {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_dir() {
-                        size += dir_size(&path)?;
-                    } else {
-                        size += entry.metadata()?.len();
+    /// Get venv size in bytes (runs blocking FS walk on a dedicated thread)
+    pub async fn get_venv_size(&self, venv_path: &Path) -> Result<u64, String> {
+        let path = venv_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            fn dir_size(path: &Path) -> std::io::Result<u64> {
+                let mut size = 0;
+                if path.is_dir() {
+                    for entry in std::fs::read_dir(path)? {
+                        let entry = entry?;
+                        let p = entry.path();
+                        if p.is_dir() {
+                            size += dir_size(&p)?;
+                        } else {
+                            size += entry.metadata()?.len();
+                        }
                     }
                 }
+                Ok(size)
             }
-            Ok(size)
-        }
 
-        if venv_path.exists() {
-            total_size = dir_size(venv_path)
-                .map_err(|e| format!("Failed to calculate venv size: {}", e))?;
-        }
-
-        Ok(total_size)
+            if path.exists() {
+                dir_size(&path)
+                    .map_err(|e| format!("Failed to calculate venv size: {}", e))
+            } else {
+                Ok(0)
+            }
+        })
+        .await
+        .map_err(|e| format!("Blocking task failed: {}", e))?
     }
 
     /// Get Python version in a venv

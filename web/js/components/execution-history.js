@@ -182,8 +182,8 @@ const ExecutionHistory = {
         if (retryBtn) {
             retryBtn.onclick = async () => {
                 try {
-                    await API.Jobs.execute(exec.job_id);
-                    Toast.success('Job re-queued', 'Execution has been queued');
+                    await API.Executions.retry(exec.id);
+                    Toast.success('Retrying', 'Execution has been re-queued for retry');
                     Modal.close('execution-modal');
                     this.load();
                 } catch (error) {
@@ -251,7 +251,27 @@ const ExecutionHistory = {
     },
     
     async clearCompleted() {
-        Toast.info('Not implemented', 'This feature is not yet available');
+        const completed = this.allExecutions.filter(
+            e => e.status === 'success' || e.status === 'failed' || e.status === 'timeout' || e.status === 'cancelled'
+        );
+
+        if (completed.length === 0) {
+            Toast.info('Nothing to clear', 'No completed executions found');
+            return;
+        }
+
+        if (!confirm(`Delete ${completed.length} completed execution(s)?`)) {
+            return;
+        }
+
+        try {
+            const ids = completed.map(e => e.id);
+            await API.Executions.bulkDelete(ids);
+            Toast.success('Cleared', `${completed.length} completed execution(s) removed`);
+            this.load();
+        } catch (error) {
+            Toast.error('Failed to clear', error.message);
+        }
     },
     
     // SSE Streaming for real-time updates

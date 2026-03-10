@@ -133,37 +133,91 @@ impl PackageRepository {
     // ============ Package Cache ============
 
     /// Create or update a cache entry
+    /// Handles NULL venv_id separately since SQLite treats NULLs as distinct in UNIQUE constraints
     pub async fn upsert_cache(&self, cache: &PackageCache) -> Result<PackageCache, AppError> {
-        sqlx::query(
-            r#"
-            INSERT INTO package_cache (
-                id, venv_type, venv_id, package_name, version, installation_path,
-                size_bytes, status, error_message, installed_at, last_used_at, use_count
+        if cache.venv_id.is_none() {
+            // For NULL venv_id (main venv), ON CONFLICT won't trigger because
+            // SQLite considers each NULL distinct. Use update-or-insert pattern.
+            let updated = sqlx::query(
+                r#"
+                UPDATE package_cache SET
+                    status = ?, error_message = ?, size_bytes = ?,
+                    last_used_at = ?, use_count = ?, installation_path = ?
+                WHERE package_name = ? AND version = ? AND venv_type = ? AND venv_id IS NULL
+                "#,
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(package_name, version, venv_type, venv_id) DO UPDATE SET
-                status = excluded.status,
-                error_message = excluded.error_message,
-                size_bytes = excluded.size_bytes,
-                last_used_at = excluded.last_used_at,
-                use_count = excluded.use_count
-            "#,
-        )
-        .bind(&cache.id)
-        .bind(&cache.venv_type)
-        .bind(&cache.venv_id)
-        .bind(&cache.package_name)
-        .bind(&cache.version)
-        .bind(&cache.installation_path)
-        .bind(cache.size_bytes)
-        .bind(&cache.status)
-        .bind(&cache.error_message)
-        .bind(&cache.installed_at)
-        .bind(&cache.last_used_at)
-        .bind(cache.use_count)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| AppError::Database(e.to_string()))?;
+            .bind(&cache.status)
+            .bind(&cache.error_message)
+            .bind(cache.size_bytes)
+            .bind(&cache.last_used_at)
+            .bind(cache.use_count)
+            .bind(&cache.installation_path)
+            .bind(&cache.package_name)
+            .bind(&cache.version)
+            .bind(&cache.venv_type)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+            if updated.rows_affected() == 0 {
+                // No existing row — insert new
+                sqlx::query(
+                    r#"
+                    INSERT INTO package_cache (
+                        id, venv_type, venv_id, package_name, version, installation_path,
+                        size_bytes, status, error_message, installed_at, last_used_at, use_count
+                    )
+                    VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&cache.id)
+                .bind(&cache.venv_type)
+                .bind(&cache.package_name)
+                .bind(&cache.version)
+                .bind(&cache.installation_path)
+                .bind(cache.size_bytes)
+                .bind(&cache.status)
+                .bind(&cache.error_message)
+                .bind(&cache.installed_at)
+                .bind(&cache.last_used_at)
+                .bind(cache.use_count)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            }
+        } else {
+            // Non-NULL venv_id: ON CONFLICT works correctly
+            sqlx::query(
+                r#"
+                INSERT INTO package_cache (
+                    id, venv_type, venv_id, package_name, version, installation_path,
+                    size_bytes, status, error_message, installed_at, last_used_at, use_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(package_name, version, venv_type, venv_id) DO UPDATE SET
+                    status = excluded.status,
+                    error_message = excluded.error_message,
+                    size_bytes = excluded.size_bytes,
+                    last_used_at = excluded.last_used_at,
+                    use_count = excluded.use_count
+                "#,
+            )
+            .bind(&cache.id)
+            .bind(&cache.venv_type)
+            .bind(&cache.venv_id)
+            .bind(&cache.package_name)
+            .bind(&cache.version)
+            .bind(&cache.installation_path)
+            .bind(cache.size_bytes)
+            .bind(&cache.status)
+            .bind(&cache.error_message)
+            .bind(&cache.installed_at)
+            .bind(&cache.last_used_at)
+            .bind(cache.use_count)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
 
         Ok(cache.clone())
     }
