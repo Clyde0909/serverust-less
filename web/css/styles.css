@@ -948,14 +948,31 @@ textarea {
 
 /* ===== Code Editor Enhancement ===== */
 #job-code {
-    min-height: 200px;
-    background: var(--bg-dark);
-    color: #e2e8f0;
-    border-color: var(--bg-dark);
+    display: none; /* hidden - CodeMirror is the real input */
 }
 
-#job-code::placeholder {
-    color: var(--text-muted);
+.code-editor-wrapper {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    min-height: 260px;
+}
+
+.code-editor-wrapper .CodeMirror {
+    height: 260px;
+    font-family: 'Fira Code', 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+    font-size: 0.875rem;
+    line-height: 1.6;
+    border-radius: 0;
+}
+
+.code-editor-wrapper .CodeMirror-scroll {
+    min-height: 260px;
+}
+
+/* Keep dracula gutter border consistent with panel */
+.code-editor-wrapper .CodeMirror-gutters {
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 /* ===== Venv Cards ===== */

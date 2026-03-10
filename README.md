@@ -73,7 +73,7 @@ sudo apt install build-essential libssl-dev pkg-config python3 python3-venv
 ### Windows
 
 - Install [Rust](https://rustup.rs/)
-- Ensure `python` is on your PATH (note: `python_executable` defaults to `python3`; on Windows you may need to set it to `python` in config)
+- Ensure `python` is on your PATH (note: `python_executable` defaults to `python3.12`; on Windows you may need to set it to `python` or `py -3.12` in config)
 
 ## Quick Start
 
@@ -101,7 +101,7 @@ The main Python venv (`venvs/main`) is created automatically on first run if it 
 
 ## Configuration
 
-Configuration is loaded from `config/default.toml`. All values have built-in defaults and can be overridden via environment variables using the `APP__` prefix (double underscore as separator).
+Configuration is loaded from `config/default.toml`. All values have built-in defaults and can be overridden via environment variables using the `SERVERUST__` prefix (double underscore as separator).
 
 ```toml
 [server]
@@ -117,7 +117,7 @@ max_connections = 10
 pool_size = 4                       # concurrent Python workers
 default_timeout_seconds = 30
 default_memory_limit_mb = 128
-python_executable = "python3"       # use "python" on Windows if needed
+python_executable = "python3.12"    # use "python" or "py -3.12" on Windows if needed
 graceful_shutdown_seconds = 30      # SIGTERM → SIGKILL grace period
 
 [queue]
@@ -133,9 +133,6 @@ pip_cache_dir = "./cache/pip"
 max_cache_size_mb = 5000
 max_custom_venvs = 50
 pip_timeout_seconds = 300
-
-[packages.conflict_resolution]
-strategy = "suggest_custom_venv"    # "suggest_custom_venv", "force_upgrade", or "fail"
 
 [retention]
 execution_history_days = 30         # delete terminal executions older than N days

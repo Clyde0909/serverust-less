@@ -1,6 +1,6 @@
 # Server configuration
 [server]
-host = "127.0.0.1"
+host = "0.0.0.0"
 port = 8080
 log_level = "info"
 
@@ -14,7 +14,7 @@ max_connections = 10
 pool_size = 4
 default_timeout_seconds = 30
 default_memory_limit_mb = 128
-python_executable = "python3"
+python_executable = "python3.12"
 graceful_shutdown_seconds = 30
 
 # Queue configuration
