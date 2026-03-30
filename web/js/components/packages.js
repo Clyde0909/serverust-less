@@ -81,14 +81,16 @@ const Packages = {
     
     renderPackageItem(pkg) {
         // Handle both object and string formats
-        const name = typeof pkg === 'string' ? pkg : (pkg.name || pkg);
-        const version = typeof pkg === 'object' ? pkg.version : null;
+        const name = typeof pkg === 'string' ? pkg : (pkg.package_name || pkg.name || pkg);
+        const version = typeof pkg === 'object' ? (pkg.version || null) : null;
+        const status = typeof pkg === 'object' ? pkg.status : null;
         
         return `
             <div class="package-item">
                 <div>
                     <span class="package-name">${escapeHtml(name)}</span>
                     ${version ? `<span class="package-version">${escapeHtml(version)}</span>` : ''}
+                    ${status ? `<span class="badge badge-${status === 'ready' ? 'success' : status === 'installing' ? 'warning' : 'danger'}">${status}</span>` : ''}
                 </div>
                 <button class="btn btn-sm btn-secondary" data-action="uninstall" data-name="${escapeHtml(name)}" title="Uninstall">
                     🗑️
@@ -117,7 +119,8 @@ const Packages = {
         }
         
         try {
-            return await API.Packages.search(query);
+            const response = await API.Packages.search(query);
+            return response.results || [];
         } catch (error) {
             console.error('Package search failed:', error);
             return [];

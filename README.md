@@ -5,14 +5,57 @@ A self-hosted serverless platform for Python code execution, built with Rust. Si
 ## Features
 
 - Execute Python code on-demand via REST API
-- Web UI for job management and monitoring
-- Virtual environment support (shared or per-job isolated)
+- Concurrent worker pool with configurable parallelism
+- Priority-based job queue with in-memory heap and SQLite overflow persistence
+- Dead letter queue for jobs that exhaust retries
+- Automatic re-queue with configurable delay on failure
+- Automatic queue recovery on restart
+- Process lifecycle management (graceful cancel / SIGKILL escalation)
+- Virtual environment support — shared main venv or per-job isolated venvs
 - Package dependency management with PyPI integration
-- Priority-based job queue with SQLite persistence
-- Real-time execution streaming via SSE
+- Package conflict detection with configurable resolution strategy
 - Resource limits (timeout, memory)
-- Execution history and audit logging
+- Real-time execution log streaming via SSE
+- Execution history and structured audit logging
+- Background retention policy scheduler (auto-cleanup of old executions and logs)
+- Bulk operations (create, delete jobs/executions)
+- Job cloning
+- Web UI for job management, monitoring, and package management
 - OpenAPI/Swagger documentation
+
+## Architecture
+
+```
+HTTP Request
+    │
+    ▼
+API Handler (axum)
+    │  enqueue()
+    ▼
+QueueManager ──overflow──► SQLite (queue table)
+    │  (in-memory BinaryHeap + SQLite overflow)
+    │  dequeue()
+    ▼
+WorkerPool  (N concurrent tokio tasks)
+    │
+    ├── PythonRunner  ── executes job code inside venv
+    ├── ProcessManager ── tracks PIDs, handles cancel/SIGTERM/SIGKILL
+    └── DB updates ── sets running / success / failed / timeout status
+            │
+            ├── Retry? ── re-queue with delay
+            └── Max retries exhausted? ── move to Dead Letter Queue
+```
+
+**Key components:**
+
+| Component | Responsibility |
+|---|---|
+| `QueueManager` | Shared `Arc<>` between API and workers; in-memory priority queue with SQLite overflow, crash-recovery, dead letter queue, and delayed retry |
+| `WorkerPool` | Spawns `pool_size` async workers that each dequeue jobs, execute Python, and write results to DB |
+| `ProcessManager` | Tracks running process PIDs; `cancel()` sends SIGTERM then escalates to SIGKILL after the grace period |
+| `PythonRunner` | Spawns the Python interpreter inside the target venv with stdout/stderr capture and timeout enforcement |
+| `PackageService` | Manages pip operations with file-based locking and conflict detection (fail / suggest custom venv / force upgrade) |
+| `RetentionScheduler` | Background task that periodically cleans old executions, orphaned logs, and stale queue entries |
 
 ## Requirements
 
@@ -21,11 +64,16 @@ A self-hosted serverless platform for Python code execution, built with Rust. Si
 - SQLite 3
 - OpenSSL development headers
 
-### Ubuntu/Debian
+### Ubuntu / Debian
 
 ```bash
 sudo apt install build-essential libssl-dev pkg-config python3 python3-venv
 ```
+
+### Windows
+
+- Install [Rust](https://rustup.rs/)
+- Ensure `python` is on your PATH (note: `python_executable` defaults to `python3.12`; on Windows you may need to set it to `python` or `py -3.12` in config)
 
 ## Quick Start
 
@@ -45,159 +93,234 @@ cargo run --release
 
 3. Access the application:
 
-- Web UI: http://localhost:3000/
-- API Docs: http://localhost:3000/swagger-ui/
+- Web UI: http://localhost:8080/
+- Swagger UI: http://localhost:8080/swagger-ui/
+- OpenAPI JSON: http://localhost:8080/api/openapi.json
+
+The main Python venv (`venvs/main`) is created automatically on first run if it does not exist.
 
 ## Configuration
 
-Configuration is loaded from `config/default.toml`:
+Configuration is loaded from `config/default.toml`. All values have built-in defaults and can be overridden via environment variables using the `SERVERUST__` prefix (double underscore as separator).
 
 ```toml
 [server]
-host = "0.0.0.0"
-port = 3000
+host = "127.0.0.1"
+port = 8080
+log_level = "info"
 
 [database]
-path = "data/serverust.db"
-
-[packages]
-main_venv_path = "venvs/main"
-job_venvs_path = "venvs/jobs"
+path = "./data/serverust.db"
+max_connections = 10
 
 [worker]
-pool_size = 4
-default_timeout = 30
-default_memory_limit = 128
+pool_size = 4                       # concurrent Python workers
+default_timeout_seconds = 30
+default_memory_limit_mb = 128
+python_executable = "python3.12"    # use "python" or "py -3.12" on Windows if needed
+graceful_shutdown_seconds = 30      # SIGTERM → SIGKILL grace period
+
+[queue]
+max_size = 1000                     # in-memory queue capacity before overflow to SQLite
+persistence_enabled = true
+retry_delay_seconds = 5             # delay before re-queuing a failed job
+max_retries = 3                     # max retries before moving to dead letter queue
+
+[packages]
+main_venv_path = "./venvs/main"
+custom_venv_base_path = "./venvs"
+pip_cache_dir = "./cache/pip"
+max_cache_size_mb = 5000
+max_custom_venvs = 50
+pip_timeout_seconds = 300
+
+[retention]
+execution_history_days = 30         # delete terminal executions older than N days
+log_max_size_bytes = 1048576        # 1 MB max per execution log
+cleanup_interval_hours = 24         # how often the retention scheduler runs
 
 [security]
+enable_auth = false
+enable_multitenancy = false
 enable_audit_log = true
 ```
 
-Environment variables can override config values using the `SERVERUST_` prefix.
+## REST API Endpoints
 
-## API Endpoints
+All API endpoints are prefixed with `/api/v1/`.
 
 ### Jobs
 
-- `GET /api/v1/jobs` - List all jobs
-- `POST /api/v1/jobs` - Create a new job
-- `GET /api/v1/jobs/{id}` - Get job details
-- `PUT /api/v1/jobs/{id}` - Update a job
-- `DELETE /api/v1/jobs/{id}` - Delete a job
-- `POST /api/v1/jobs/{id}/execute` - Execute a job
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/jobs` | List all jobs (paginated) |
+| `POST` | `/api/v1/jobs` | Create a job |
+| `POST` | `/api/v1/jobs/bulk` | Bulk create multiple jobs |
+| `GET` | `/api/v1/jobs/{id}` | Get job details |
+| `PUT` | `/api/v1/jobs/{id}` | Update a job |
+| `DELETE` | `/api/v1/jobs/{id}` | Delete a job |
+| `POST` | `/api/v1/jobs/{id}/execute` | Enqueue a job for execution |
+| `POST` | `/api/v1/jobs/{id}/clone` | Clone a job |
+| `POST` | `/api/v1/jobs/{id}/enable` | Enable a job |
+| `POST` | `/api/v1/jobs/{id}/disable` | Disable a job |
+| `GET` | `/api/v1/jobs/{id}/dependencies` | Get job package dependencies |
+| `PUT` | `/api/v1/jobs/{id}/dependencies` | Update job package dependencies |
 
 ### Executions
 
-- `GET /api/v1/executions` - List executions
-- `GET /api/v1/executions/{id}` - Get execution details
-- `POST /api/v1/executions/{id}/cancel` - Cancel execution
-- `GET /api/v1/executions/{id}/logs` - Get execution logs
-- `GET /api/v1/executions/{id}/stream` - Stream logs via SSE
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/executions` | List executions (filterable, paginated) |
+| `GET` | `/api/v1/executions/{id}` | Get execution details |
+| `DELETE` | `/api/v1/executions/{id}` | Delete an execution |
+| `POST` | `/api/v1/executions/{id}/cancel` | Cancel a running execution (SIGTERM → SIGKILL) |
+| `POST` | `/api/v1/executions/{id}/retry` | Re-enqueue a failed/cancelled execution |
+| `GET` | `/api/v1/executions/{id}/logs` | Get execution logs |
+| `GET` | `/api/v1/executions/{id}/stream` | Stream logs in real-time via SSE |
+| `POST` | `/api/v1/executions/bulk-delete` | Bulk delete multiple executions |
 
 ### Packages
 
-- `GET /api/v1/packages` - List installed packages
-- `POST /api/v1/packages/install` - Install a package
-- `POST /api/v1/packages/uninstall` - Uninstall a package
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/packages` | List installed packages in main venv |
+| `POST` | `/api/v1/packages/install` | Install a package (with conflict detection) |
+| `POST` | `/api/v1/packages/uninstall` | Uninstall a package |
+| `GET` | `/api/v1/packages/search` | Search PyPI for packages |
+| `GET` | `/api/v1/packages/main-venv-status` | Get main venv status |
 
 ### Virtual Environments
 
-- `GET /api/v1/venvs` - List virtual environments
-- `GET /api/v1/venvs/{id}` - Get venv details
-- `DELETE /api/v1/venvs/{id}` - Delete a venv
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/venvs` | List virtual environments |
+| `GET` | `/api/v1/venvs/{id}` | Get venv details (including installed packages) |
+| `DELETE` | `/api/v1/venvs/{id}` | Delete a custom venv |
+| `POST` | `/api/v1/venvs/{id}/toggle` | Toggle custom venv active/inactive |
 
-### Health
+### Queue
 
-- `GET /api/v1/health` - Health check
-- `GET /api/v1/stats` - System statistics
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/queue/status` | Current queue status, depth, and dead letter queue info |
+
+### Health & Monitoring
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/health` | Health check |
+| `GET` | `/api/v1/stats` | System statistics (job/execution counts) |
+| `GET` | `/api/v1/workers/status` | Worker pool status |
+
+### OpenAPI
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/openapi.json` | OpenAPI 3.0 spec (JSON) |
+| `GET` | `/swagger-ui/` | Interactive Swagger UI |
 
 ## Project Structure
 
 ```
 serverust-less/
 ├── src/
-│   ├── api/          # REST API handlers
-│   ├── db/           # Database repositories
-│   ├── models/       # Data models and DTOs
-│   ├── queue/        # Job queue management
-│   ├── services/     # Business logic layer
-│   ├── worker/       # Python execution workers
-│   ├── config.rs     # Configuration loading
-│   ├── error.rs      # Error types
-│   ├── lib.rs        # Library exports
-│   └── main.rs       # Application entry point
-├── migrations/       # SQLite migrations
-├── web/              # Web UI (HTML/CSS/JS)
-├── config/           # Configuration files
-├── venvs/            # Virtual environments
-└── data/             # SQLite database
+│   ├── api/                    # REST API handlers (axum)
+│   │   ├── executions.rs       # execution lifecycle, cancel, retry, bulk delete
+│   │   ├── health.rs           # health check, stats, worker status
+│   │   ├── jobs.rs             # CRUD, execute, clone, enable/disable, dependencies
+│   │   ├── packages.rs         # install, uninstall, search, venv status
+│   │   ├── queue.rs            # queue status
+│   │   ├── venvs.rs            # list, get, delete, toggle venvs
+│   │   └── mod.rs              # AppState, router, OpenAPI setup
+│   ├── db/                     # SQLite repositories (sqlx)
+│   │   ├── executions.rs
+│   │   ├── jobs.rs
+│   │   ├── logs.rs
+│   │   ├── venvs.rs
+│   │   └── mod.rs
+│   ├── models/                 # Data structs, DTOs, enums
+│   ├── queue/
+│   │   └── manager.rs          # QueueManager: priority heap + SQLite overflow + DLQ + recovery
+│   ├── services/               # Business logic layer
+│   │   ├── execution_service.rs
+│   │   ├── job_service.rs
+│   │   └── mod.rs
+│   ├── worker/
+│   │   ├── pool.rs             # WorkerPool: concurrent job executors
+│   │   ├── executor.rs         # Job execution coordinator
+│   │   ├── process_manager.rs  # PID tracking, graceful cancel
+│   │   ├── python_runner.rs    # Python subprocess execution
+│   │   ├── venv_manager.rs     # Venv creation and management
+│   │   └── package_manager.rs  # pip operations and conflict detection
+│   ├── config.rs               # Configuration structs and loading
+│   ├── error.rs                # Unified error type
+│   ├── lib.rs                  # Crate exports
+│   └── main.rs                 # Startup: DB, migrations, queue recovery, retention scheduler, worker pool, HTTP server
+├── migrations/                 # SQLite schema migrations (15 files)
+├── web/                        # Web UI (HTML / CSS / vanilla JS SPA)
+│   ├── index.html
+│   ├── css/
+│   └── js/
+│       ├── api.js              # API client
+│       ├── app.js              # SPA router and layout
+│       └── components/         # UI components (job-list, execution-history, packages, venvs)
+├── config/
+│   └── default.toml            # Default configuration
+├── venvs/                      # Python virtual environments (auto-created)
+└── data/                       # SQLite database file (auto-created)
 ```
 
 ## Development
 
-Run tests:
-
 ```bash
-cargo test
-```
+# Type-check without linking
+cargo check
 
-Check for issues:
+# Run with debug logging
+RUST_LOG=debug cargo run
 
-```bash
+# Lint
 cargo clippy
+
+# Tests
+cargo test
 ```
 
 ## Logging
 
-### Backend Logging
+### Backend
 
-The backend uses the `tracing` crate with configurable log levels via the `RUST_LOG` environment variable.
-
-Default log levels:
+The backend uses the `tracing` crate. Log level is controlled by the `RUST_LOG` environment variable:
 
 ```bash
-# Default: info level with debug for application and tower_http
+# Default (info + debug for app code and tower_http)
 cargo run
-```
 
-Custom log levels:
-
-```bash
-# Debug all components
+# Verbose
 RUST_LOG=debug cargo run
 
-# Trace SQL queries and execution details
+# Trace SQL and worker details
 RUST_LOG=trace cargo run
 
-# Only show warnings and errors
+# Quiet
 RUST_LOG=warn cargo run
 
-# Granular control
+# Granular
 RUST_LOG=info,serverust_less::worker=trace,tower_http=debug cargo run
 ```
 
-Log levels in order of verbosity: trace, debug, info, warn, error
+Verbosity order: `trace` > `debug` > `info` > `warn` > `error`
 
-### Frontend Logging
+### Frontend
 
-The web UI includes a Logger utility that writes to the browser console. It is disabled by default for performance.
-
-Enable in browser console:
+The Web UI includes a `Logger` utility that writes to the browser console. It is disabled by default.
 
 ```javascript
-Logger.enable();   // Turn on debug logging
-Logger.disable();  // Turn off debug logging
+Logger.enable();   // turn on (persists via localStorage)
+Logger.disable();  // turn off
 ```
 
-When enabled, the frontend logs:
-- API requests and response times
-- Navigation events
-- Component loading (jobs, executions, packages, venvs)
-- Toast notifications
-- Modal interactions
-- Errors and warnings
-
-The setting persists across page refreshes using localStorage.
+When enabled, the frontend logs API request timings, navigation events, component lifecycle, and errors.
 
 ## License
 

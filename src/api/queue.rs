@@ -29,8 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
 pub async fn get_queue_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<QueueStatusResponse>, AppError> {
-    // Get in-memory queue size from worker pool if available
-    let in_memory_size = 0; // TODO: Get from worker pool
+    let in_memory_size = state.queue_manager.memory_queue_size().await;
     let response = state.queue_service.get_status(in_memory_size).await?;
     Ok(Json(response))
 }

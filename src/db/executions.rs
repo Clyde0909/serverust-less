@@ -259,8 +259,9 @@ impl ExecutionRepository {
         .map_err(|e| AppError::Database(e.to_string()))
     }
 
-    /// Get pending executions that can be retried
-    pub async fn get_retriable(&self, max_retries: i32) -> Result<Vec<Execution>, AppError> {
+    /// Get pending executions that can be retried.
+    /// Uses per-job `max_retries` from the `jobs` table (parameter removed — was unused).
+    pub async fn get_retriable(&self) -> Result<Vec<Execution>, AppError> {
         sqlx::query_as::<_, Execution>(
             r#"
             SELECT e.id, e.job_id, e.status, e.input_data, e.output_data, e.error_message,
@@ -293,29 +294,95 @@ impl ExecutionRepository {
         .map_err(|e| AppError::Database(e.to_string()))
     }
 
-    /// Update execution status with optional error message
+    /// Update execution status with optional error message.
+    /// Only sets `completed_at` and `duration_ms` for terminal statuses.
     pub async fn update_status(
         &self,
         id: &str,
         status: crate::models::ExecutionStatus,
         error_message: Option<String>,
     ) -> Result<(), AppError> {
-        let now = chrono::Utc::now();
-        sqlx::query(
+        if status.is_terminal() {
+            // For terminal statuses, compute duration from started_at and set completed_at
+            let now = chrono::Utc::now();
+            // Fetch started_at to compute duration_ms
+            let execution = self.get_by_id(id).await.ok();
+            let duration_ms: Option<i64> = execution.and_then(|e| {
+                e.started_at.and_then(|started| {
+                    chrono::DateTime::parse_from_rfc3339(&started)
+                        .ok()
+                        .map(|start| (now - start.with_timezone(&chrono::Utc)).num_milliseconds())
+                })
+            });
+
+            sqlx::query(
+                r#"
+                UPDATE executions
+                SET status = ?, error_message = ?, completed_at = ?, duration_ms = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(status.as_str())
+            .bind(&error_message)
+            .bind(&now)
+            .bind(duration_ms)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        } else {
+            // Non-terminal statuses: only update status and error_message
+            sqlx::query(
+                r#"
+                UPDATE executions
+                SET status = ?, error_message = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(status.as_str())
+            .bind(&error_message)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    /// Delete executions older than the specified number of days.
+    /// Only deletes terminal executions (completed, failed, timeout, cancelled).
+    /// Returns the number of deleted rows.
+    pub async fn delete_older_than_days(&self, days: u32) -> Result<u64, AppError> {
+        let result = sqlx::query(
             r#"
-            UPDATE executions
-            SET status = ?, error_message = ?, completed_at = ?
-            WHERE id = ?
+            DELETE FROM executions
+            WHERE status IN ('success', 'failed', 'timeout', 'cancelled')
+            AND completed_at IS NOT NULL
+            AND completed_at < datetime('now', '-' || ? || ' days')
             "#,
         )
-        .bind(status.as_str())
-        .bind(&error_message)
-        .bind(&now)
-        .bind(id)
+        .bind(days)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        Ok(())
+        Ok(result.rows_affected())
+    }
+
+    /// Count total executions (efficient single-value query)
+    pub async fn count_all(&self) -> Result<i64, AppError> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM executions")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Count currently running executions
+    pub async fn count_running(&self) -> Result<i64, AppError> {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM executions WHERE status = 'running'")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))
     }
 }

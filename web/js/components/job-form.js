@@ -7,11 +7,39 @@ const JobForm = {
     modal: null,
     form: null,
     dependencies: [],
+    isSaving: false,
+    codeEditor: null,
     
     init() {
         this.modal = document.getElementById('job-modal');
         this.form = document.getElementById('job-form');
+        this._initCodeEditor();
         this.setupFormHandlers();
+    },
+
+    _initCodeEditor() {
+        const wrapper = document.getElementById('job-code-editor');
+        if (!wrapper || this.codeEditor) return;
+        this.codeEditor = CodeMirror(wrapper, {
+            mode: 'python',
+            theme: 'dracula',
+            lineNumbers: true,
+            indentUnit: 4,
+            tabSize: 4,
+            indentWithTabs: false,
+            lineWrapping: false,
+            autofocus: false,
+            extraKeys: {
+                Tab: (cm) => {
+                    if (cm.somethingSelected()) {
+                        cm.indentSelection('add');
+                    } else {
+                        cm.replaceSelection('    ', 'end');
+                    }
+                },
+                'Shift-Tab': (cm) => cm.indentSelection('subtract'),
+            },
+        });
     },
     
     setupFormHandlers() {
@@ -43,7 +71,6 @@ const JobForm = {
     },
     
     openNew() {
-        this.init();
         this.reset();
         
         document.getElementById('job-modal-title').textContent = 'New Job';
@@ -53,7 +80,6 @@ const JobForm = {
     },
     
     async openEdit(jobId) {
-        this.init();
         this.reset();
         
         try {
@@ -70,6 +96,7 @@ const JobForm = {
     },
     
     reset() {
+        this.isSaving = false;
         this.form?.reset();
         document.getElementById('job-id').value = '';
         this.dependencies = [];
@@ -81,6 +108,13 @@ const JobForm = {
         document.getElementById('job-retries').value = '0';
         document.getElementById('job-priority').value = '0';
         document.getElementById('job-custom-venv').checked = false;
+
+        // Reset code editor
+        if (this.codeEditor) {
+            this.codeEditor.setValue("# Enter your Python code here\nprint('Hello, World!')");
+            this.codeEditor.clearHistory();
+            setTimeout(() => this.codeEditor.refresh(), 10);
+        }
     },
     
     populateForm(job) {
@@ -88,6 +122,11 @@ const JobForm = {
         document.getElementById('job-name').value = job.name;
         document.getElementById('job-description').value = job.description || '';
         document.getElementById('job-code').value = job.python_code;
+        if (this.codeEditor) {
+            this.codeEditor.setValue(job.python_code || '');
+            this.codeEditor.clearHistory();
+            setTimeout(() => this.codeEditor.refresh(), 10);
+        }
         document.getElementById('job-timeout').value = job.timeout_seconds;
         document.getElementById('job-memory').value = job.memory_limit_mb;
         document.getElementById('job-retries').value = job.max_retries;
@@ -178,6 +217,9 @@ const JobForm = {
     },
     
     async save() {
+        if (this.isSaving) return;
+        this.isSaving = true;
+
         const id = document.getElementById('job-id').value;
         const isNew = !id;
         
@@ -185,7 +227,7 @@ const JobForm = {
         const jobData = {
             name: document.getElementById('job-name').value.trim(),
             description: document.getElementById('job-description').value.trim() || null,
-            python_code: document.getElementById('job-code').value,
+            python_code: this.codeEditor ? this.codeEditor.getValue() : document.getElementById('job-code').value,
             timeout_seconds: parseInt(document.getElementById('job-timeout').value, 10),
             memory_limit_mb: parseInt(document.getElementById('job-memory').value, 10),
             max_retries: parseInt(document.getElementById('job-retries').value, 10),
@@ -209,7 +251,8 @@ const JobForm = {
         
         if (!jobData.python_code) {
             Toast.error('Validation Error', 'Python code is required');
-            document.getElementById('job-code').focus();
+            if (this.codeEditor) this.codeEditor.focus();
+            else document.getElementById('job-code').focus();
             return;
         }
         
@@ -223,6 +266,13 @@ const JobForm = {
             return;
         }
         
+        const saveBtn = document.getElementById('btn-save-job');
+        const originalText = saveBtn?.textContent;
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.textContent = isNew ? 'Creating…' : 'Updating…';
+        }
+
         try {
             if (isNew) {
                 await API.Jobs.create(jobData);
@@ -236,6 +286,12 @@ const JobForm = {
             JobList.load();
         } catch (error) {
             Toast.error('Failed to save', error.message);
+        } finally {
+            this.isSaving = false;
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.textContent = originalText;
+            }
         }
     },
 };

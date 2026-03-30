@@ -69,6 +69,7 @@ impl QueueService {
         let processing = self.repo.count_processing().await?;
         let completed_last_hour = self.repo.count_completed_last_hour().await?;
         let failed_last_hour = self.repo.count_failed_last_hour().await?;
+        let dead_letter_count = self.repo.count_dead_letter().await?;
 
         let depth = self.repo.get_depth_by_priority().await?;
         let by_priority: Vec<PriorityCount> = depth
@@ -84,6 +85,7 @@ impl QueueService {
             processing,
             completed_last_hour,
             failed_last_hour,
+            dead_letter_count,
             by_priority,
             in_memory_size,
             overflow_size,
