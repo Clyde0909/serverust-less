@@ -234,16 +234,16 @@ async fn test_execute_nonexistent_job_returns_404() {
 }
 
 #[tokio::test]
-async fn test_execute_disabled_job_returns_400() {
+async fn test_execute_disabled_job_auto_enables() {
     let app = setup().await;
     let job = create_job(&app, "disabled-job").await;
     let job_id = job["id"].as_str().unwrap();
 
-    // Disable the job
+    // Disable the job explicitly
     let resp = send_empty(&app, Method::POST, &format!("/api/v1/jobs/{job_id}/disable")).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Try to execute
+    // Execute should auto-enable the job and return 201
     let resp = send_json(
         &app,
         Method::POST,
@@ -251,7 +251,13 @@ async fn test_execute_disabled_job_returns_400() {
         json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // Verify the job is now enabled
+    let get_resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs/{job_id}")).await;
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let job_json = json_body(get_resp).await;
+    assert!(job_json["enabled"].as_bool().unwrap_or(false), "Job should be auto-enabled after Execute");
 }
 
 #[tokio::test]

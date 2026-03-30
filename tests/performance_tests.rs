@@ -229,7 +229,7 @@ async fn test_execute_job_concurrently() {
 
     let mut ok_count = 0;
     for handle in handles {
-        if handle.await.unwrap() == StatusCode::OK {
+        if handle.await.unwrap() == StatusCode::CREATED {
             ok_count += 1;
         }
     }
@@ -456,7 +456,7 @@ async fn test_rapid_create_read_delete_cycle() {
 
         // Delete
         let resp = send_empty(&app, Method::DELETE, &format!("/api/v1/jobs/{id}")).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
         // Verify 404
         let resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs/{id}")).await;

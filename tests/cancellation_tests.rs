@@ -131,7 +131,7 @@ async fn execute_job(app: &Router, job_id: &str) -> Value {
         json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "Failed to execute job");
+    assert_eq!(resp.status(), StatusCode::CREATED, "Failed to execute job");
     json_body(resp).await
 }
 

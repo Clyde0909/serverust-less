@@ -239,6 +239,8 @@ pub async fn add_job_dependency(
     Path(job_id): Path<String>,
     Json(req): Json<AddDependencyRequest>,
 ) -> Result<(axum::http::StatusCode, Json<JobDependency>), AppError> {
+    // Verify job exists first to return 404 instead of a DB constraint error
+    state.job_service.get_job(&job_id).await?;
     let dep = state.package_service.add_dependency(&job_id, req).await?;
     Ok((axum::http::StatusCode::CREATED, Json(dep)))
 }

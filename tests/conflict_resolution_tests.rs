@@ -256,7 +256,7 @@ async fn test_remove_dependency() {
         &format!("/api/v1/jobs/{job_id}/dependencies/requests"),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify gone
     let resp = send_empty(

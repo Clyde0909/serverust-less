@@ -6,6 +6,7 @@ use crate::models::{
     Execution, ExecuteJobRequest, ExecutionListResponse, ExecutionLog, ExecutionLogsResponse,
     ExecutionStatus, ListExecutionsQuery, ListLogsQuery,
 };
+use chrono::Utc;
 use tracing::{debug, info, instrument, warn};
 
 /// Service for execution management
@@ -39,14 +40,14 @@ impl ExecutionService {
     ) -> Result<Execution, AppError> {
         debug!("Creating execution for job");
         
-        // Verify job exists and is enabled
-        let job = self.job_repo.get_by_id(job_id).await?;
+        // Verify job exists; auto-enable if disabled (Execute action always enables)
+        let mut job = self.job_repo.get_by_id(job_id).await?;
         if !job.enabled {
-            warn!(job_id = %job_id, job_name = %job.name, "Attempted to execute disabled job");
-            return Err(AppError::BadRequest(format!(
-                "Job '{}' is disabled",
-                job.name
-            )));
+            warn!(job_id = %job_id, job_name = %job.name, "Job is disabled — auto-enabling on Execute");
+            job.enabled = true;
+            job.updated_at = Utc::now().to_rfc3339();
+            job = self.job_repo.update(&job).await?;
+            info!(job_id = %job_id, "Job auto-enabled via Execute");
         }
 
         let input_data = req.and_then(|r| r.input_data);

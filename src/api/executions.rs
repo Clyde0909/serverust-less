@@ -117,7 +117,7 @@ pub async fn bulk_delete_executions(
     Json(req): Json<BulkDeleteRequest>,
 ) -> Result<Json<BulkOperationResponse>, AppError> {
     if req.ids.is_empty() {
-        return Err(AppError::Validation("No IDs provided".to_string()));
+        return Err(AppError::BadRequest("No IDs provided".to_string()));
     }
 
     let total = req.ids.len() as u64;
