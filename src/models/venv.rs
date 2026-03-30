@@ -6,6 +6,15 @@ use sqlx::FromRow;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+/// Request to create a standalone named venv
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateVenvRequest {
+    /// Display name for the venv (used as directory name)
+    pub name: String,
+    /// Optional Python version hint (informational)
+    pub python_version: Option<String>,
+}
+
 /// Venv type
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -201,5 +210,24 @@ impl Venv {
     /// Check if venv is usable
     pub fn is_ready(&self) -> bool {
         self.status == VenvStatus::Ready.as_str()
+    }
+
+    /// Create a new standalone named venv (not tied to a job)
+    pub fn new_standalone(name: &str, path: &str, python_version: Option<String>) -> Self {
+        let now = Utc::now().to_rfc3339();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            venv_type: VenvType::Custom.as_str().to_string(),
+            job_id: None,
+            path: path.to_string(),
+            python_version,
+            status: VenvStatus::Creating.as_str().to_string(),
+            size_bytes: None,
+            package_count: 0,
+            error_message: None,
+            created_at: now.clone(),
+            updated_at: now,
+            last_used_at: None,
+        }
     }
 }

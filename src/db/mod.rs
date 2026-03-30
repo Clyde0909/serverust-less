@@ -1,19 +1,23 @@
 //! Database layer module
 
 pub mod audit;
+pub mod dags;
 pub mod execution_logs;
 pub mod executions;
 pub mod jobs;
 pub mod packages;
 pub mod queue;
+pub mod schedules;
 pub mod venvs;
 
 pub use audit::AuditRepository;
+pub use dags::DagRepository;
 pub use execution_logs::ExecutionLogRepository;
 pub use executions::ExecutionRepository;
 pub use jobs::JobRepository;
 pub use packages::PackageRepository;
 pub use queue::QueueRepository;
+pub use schedules::ScheduleRepository;
 pub use venvs::VenvRepository;
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};

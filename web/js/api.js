@@ -332,6 +332,16 @@ const VenvsAPI = {
     },
 
     /**
+     * Create a new named virtual environment
+     */
+    async create(data) {
+        return request('/venvs', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        });
+    },
+
+    /**
      * Get a specific venv (includes venv details)
      */
     async get(id) {
@@ -345,6 +355,13 @@ const VenvsAPI = {
         return request(`/venvs/${id}`, {
             method: 'DELETE',
         });
+    },
+
+    /**
+     * List packages installed in a specific venv
+     */
+    async listPackages(id) {
+        return request(`/venvs/${id}/packages`);
     },
 };
 

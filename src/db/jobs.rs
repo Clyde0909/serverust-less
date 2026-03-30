@@ -26,8 +26,8 @@ impl JobRepository {
             r#"
             INSERT INTO jobs (
                 id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                use_custom_venv, priority, max_retries, created_at, updated_at, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&job.id)
@@ -37,6 +37,7 @@ impl JobRepository {
         .bind(job.timeout_seconds)
         .bind(job.memory_limit_mb)
         .bind(job.use_custom_venv)
+        .bind(&job.venv_id)
         .bind(job.priority)
         .bind(job.max_retries)
         .bind(&job.created_at)
@@ -57,7 +58,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
             FROM jobs
             WHERE id = ?
             "#,
@@ -76,7 +77,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
             FROM jobs
             WHERE name = ?
             "#,
@@ -92,7 +93,7 @@ impl JobRepository {
         let mut sql_query = String::from(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
             FROM jobs
             WHERE 1=1
             "#,
@@ -151,7 +152,7 @@ impl JobRepository {
             r#"
             UPDATE jobs
             SET name = ?, description = ?, python_code = ?, timeout_seconds = ?,
-                memory_limit_mb = ?, use_custom_venv = ?, priority = ?, max_retries = ?,
+                memory_limit_mb = ?, use_custom_venv = ?, venv_id = ?, priority = ?, max_retries = ?,
                 updated_at = ?, enabled = ?
             WHERE id = ?
             "#,
@@ -162,6 +163,7 @@ impl JobRepository {
         .bind(job.timeout_seconds)
         .bind(job.memory_limit_mb)
         .bind(job.use_custom_venv)
+        .bind(&job.venv_id)
         .bind(job.priority)
         .bind(job.max_retries)
         .bind(&job.updated_at)

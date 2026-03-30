@@ -236,9 +236,8 @@ const ExecutionHistory = {
     },
     
     async cancelExecution(execId) {
-        if (!confirm('Are you sure you want to cancel this execution?')) {
-            return;
-        }
+        const ok = await Confirm.show('Are you sure you want to cancel this execution?', { title: 'Cancel Execution', confirmText: 'Cancel', danger: true });
+        if (!ok) return;
         
         try {
             await API.Executions.cancel(execId);
@@ -260,9 +259,8 @@ const ExecutionHistory = {
             return;
         }
 
-        if (!confirm(`Delete ${completed.length} completed execution(s)?`)) {
-            return;
-        }
+        const ok = await Confirm.show(`Delete ${completed.length} completed execution(s)?`, { title: 'Clear Completed', confirmText: 'Delete All' });
+        if (!ok) return;
 
         try {
             const ids = completed.map(e => e.id);

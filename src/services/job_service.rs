@@ -130,6 +130,7 @@ impl JobService {
             timeout_seconds: None,
             memory_limit_mb: None,
             use_custom_venv: None,
+            venv_id: None,
             priority: None,
             max_retries: None,
             enabled: Some(true),
@@ -146,6 +147,7 @@ impl JobService {
             timeout_seconds: None,
             memory_limit_mb: None,
             use_custom_venv: None,
+            venv_id: None,
             priority: None,
             max_retries: None,
             enabled: Some(false),
@@ -194,6 +196,7 @@ impl JobService {
             timeout_seconds: source.timeout_seconds,
             memory_limit_mb: source.memory_limit_mb,
             use_custom_venv: source.use_custom_venv,
+            venv_id: source.venv_id,
             priority: source.priority,
             max_retries: source.max_retries,
         };

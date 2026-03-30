@@ -4,9 +4,11 @@
 
 pub mod api;
 pub mod config;
+pub mod dag;
 pub mod db;
 pub mod error;
 pub mod models;
 pub mod queue;
+pub mod scheduler;
 pub mod services;
 pub mod worker;

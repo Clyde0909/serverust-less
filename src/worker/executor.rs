@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::QueueItem;
+use crate::models::{Execution, QueueItem};
 use crate::worker::python_runner::{ExecutionResult, PythonRunner};
 
 /// Job executor handles the execution of a single job

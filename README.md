@@ -11,16 +11,21 @@ A self-hosted serverless platform for Python code execution, built with Rust. Si
 - Automatic re-queue with configurable delay on failure
 - Automatic queue recovery on restart
 - Process lifecycle management (graceful cancel / SIGKILL escalation)
-- Virtual environment support — shared main venv or per-job isolated venvs
-- Package dependency management with PyPI integration
+- Virtual environment support — shared main venv, per-job isolated venvs, or named standalone venvs
+- **Per-job venv selection** — assign any named venv to a job via dropdown; `venv_id` stored in DB
+- Named venv creation with explicit Python version (resolved from `3.12.3` → `python3.12`)
+- Package management per-venv: main venv via DB-backed pip cache, custom venvs via live `pip list`
 - Package conflict detection with configurable resolution strategy
+- **Scheduled jobs** — cron expressions with automatic execution via background scheduler
+- **DAG workflows** — directed acyclic graph job orchestration with topological execution, cycle detection, and failure policies
 - Resource limits (timeout, memory)
 - Real-time execution log streaming via SSE
 - Execution history and structured audit logging
 - Background retention policy scheduler (auto-cleanup of old executions and logs)
 - Bulk operations (create, delete jobs/executions)
-- Job cloning
-- Web UI for job management, monitoring, and package management
+- Job cloning (including `venv_id` propagation)
+- Jobs created disabled by default; Execute action auto-enables them
+- Web UI — single-page app with CodeMirror (Dracula/Python), modal dialogs, reusable Confirm/Toast/Modal system
 - OpenAPI/Swagger documentation
 
 ## Architecture
@@ -40,10 +45,24 @@ WorkerPool  (N concurrent tokio tasks)
     │
     ├── PythonRunner  ── executes job code inside venv
     ├── ProcessManager ── tracks PIDs, handles cancel/SIGTERM/SIGKILL
-    └── DB updates ── sets running / success / failed / timeout status
-            │
-            ├── Retry? ── re-queue with delay
-            └── Max retries exhausted? ── move to Dead Letter Queue
+    ├── DB updates ── sets running / success / failed / timeout status
+    │       │
+    │       ├── Retry? ── re-queue with delay
+    │       └── Max retries exhausted? ── move to Dead Letter Queue
+    └── DagEngine callback ── advances DAG runs when a node completes
+
+SchedulerRunner (background)
+    │  tick every N seconds
+    ├── finds due cron schedules
+    ├── creates executions
+    └── enqueues via QueueManager
+
+DagEngine
+    │  triggered via API or scheduler
+    ├── creates DagRun with DagNodeExecutions
+    ├── finds root nodes (no upstream deps)
+    ├── executes nodes in topological order
+    └── respects max_concurrent_nodes and on_failure policy
 ```
 
 **Key components:**
@@ -55,7 +74,13 @@ WorkerPool  (N concurrent tokio tasks)
 | `ProcessManager` | Tracks running process PIDs; `cancel()` sends SIGTERM then escalates to SIGKILL after the grace period |
 | `PythonRunner` | Spawns the Python interpreter inside the target venv with stdout/stderr capture and timeout enforcement |
 | `PackageService` | Manages pip operations with file-based locking and conflict detection (fail / suggest custom venv / force upgrade) |
+| `VenvManager` | Creates/deletes named venvs; resolves Python version strings (e.g. `3.12.3` → `python3.12`); exposes `python_executable()` and `list_packages()` |
+| `VenvService` | DB-backed venv lifecycle: `ensure_main_venv()`, `mark_ready()`, `mark_failed()`, LRU eviction helpers |
 | `RetentionScheduler` | Background task that periodically cleans old executions, orphaned logs, and stale queue entries |
+| `SchedulerRunner` | Background cron tick loop — finds due schedules, creates executions, enqueues them |
+| `DagEngine` | DAG workflow orchestrator — triggers runs, advances nodes in topological order, handles failure policies |
+| `ScheduleService` | Cron expression validation, schedule CRUD, next-run calculation |
+| `DagService` | DAG CRUD, edge management, cycle detection (Kahn's algorithm), topological level analysis |
 
 ## Requirements
 
@@ -139,6 +164,10 @@ execution_history_days = 30         # delete terminal executions older than N da
 log_max_size_bytes = 1048576        # 1 MB max per execution log
 cleanup_interval_hours = 24         # how often the retention scheduler runs
 
+[scheduler]
+tick_interval_seconds = 10          # how often the scheduler checks for due cron jobs
+enabled = true                      # set to false to disable the background scheduler
+
 [security]
 enable_auth = false
 enable_multitenancy = false
@@ -153,56 +182,98 @@ All API endpoints are prefixed with `/api/v1/`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/jobs` | List all jobs (paginated) |
-| `POST` | `/api/v1/jobs` | Create a job |
+| `GET` | `/api/v1/jobs` | List all jobs (paginated, searchable) |
+| `POST` | `/api/v1/jobs` | Create a job (disabled by default; `venv_id` optional) |
 | `POST` | `/api/v1/jobs/bulk` | Bulk create multiple jobs |
+| `DELETE` | `/api/v1/jobs/bulk` | Bulk delete multiple jobs |
 | `GET` | `/api/v1/jobs/{id}` | Get job details |
-| `PUT` | `/api/v1/jobs/{id}` | Update a job |
+| `PUT` | `/api/v1/jobs/{id}` | Update a job (including `venv_id`) |
 | `DELETE` | `/api/v1/jobs/{id}` | Delete a job |
-| `POST` | `/api/v1/jobs/{id}/execute` | Enqueue a job for execution |
-| `POST` | `/api/v1/jobs/{id}/clone` | Clone a job |
+| `POST` | `/api/v1/jobs/{id}/execute` | Enqueue a job (auto-enables if disabled) |
+| `POST` | `/api/v1/jobs/{id}/clone` | Clone a job (copies `venv_id`) |
 | `POST` | `/api/v1/jobs/{id}/enable` | Enable a job |
 | `POST` | `/api/v1/jobs/{id}/disable` | Disable a job |
-| `GET` | `/api/v1/jobs/{id}/dependencies` | Get job package dependencies |
-| `PUT` | `/api/v1/jobs/{id}/dependencies` | Update job package dependencies |
+| `GET` | `/api/v1/jobs/{id}/dependencies` | List job package dependencies |
+| `POST` | `/api/v1/jobs/{id}/dependencies` | Add a package dependency to a job |
+| `PUT` | `/api/v1/jobs/{id}/dependencies/{name}` | Update dependency version |
+| `DELETE` | `/api/v1/jobs/{id}/dependencies/{name}` | Remove a dependency |
+| `POST` | `/api/v1/jobs/{id}/dependencies/install` | Install all job dependencies |
+| `GET` | `/api/v1/jobs/{id}/dependencies/status` | Check dependency installation status |
+| `GET` | `/api/v1/jobs/{id}/executions` | List executions for a specific job |
 
 ### Executions
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/executions` | List executions (filterable, paginated) |
+| `GET` | `/api/v1/executions` | List executions (filterable by status, job, date range; paginated) |
 | `GET` | `/api/v1/executions/{id}` | Get execution details |
-| `DELETE` | `/api/v1/executions/{id}` | Delete an execution |
+| `DELETE` | `/api/v1/executions/{id}` | Delete an execution record |
+| `DELETE` | `/api/v1/executions/bulk` | Bulk delete multiple executions |
 | `POST` | `/api/v1/executions/{id}/cancel` | Cancel a running execution (SIGTERM → SIGKILL) |
 | `POST` | `/api/v1/executions/{id}/retry` | Re-enqueue a failed/cancelled execution |
 | `GET` | `/api/v1/executions/{id}/logs` | Get execution logs |
 | `GET` | `/api/v1/executions/{id}/stream` | Stream logs in real-time via SSE |
-| `POST` | `/api/v1/executions/bulk-delete` | Bulk delete multiple executions |
 
 ### Packages
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/packages` | List installed packages in main venv |
-| `POST` | `/api/v1/packages/install` | Install a package (with conflict detection) |
-| `POST` | `/api/v1/packages/uninstall` | Uninstall a package |
+| `GET` | `/api/v1/packages` | List installed packages in main venv (DB-backed) |
+| `POST` | `/api/v1/packages/install` | Install a package to main venv (with conflict detection) |
+| `POST` | `/api/v1/packages/uninstall` | Uninstall a package from main venv |
 | `GET` | `/api/v1/packages/search` | Search PyPI for packages |
-| `GET` | `/api/v1/packages/main-venv-status` | Get main venv status |
+| `GET` | `/api/v1/packages/main-venv` | Get main venv package list and status |
+| `POST` | `/api/v1/packages/main-venv/update` | Update all packages in main venv |
+| `DELETE` | `/api/v1/packages/main-venv` | Clear and recreate main venv |
+| `DELETE` | `/api/v1/packages/{name}/{version}` | Remove a package from cache |
 
 ### Virtual Environments
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/v1/venvs` | List virtual environments |
-| `GET` | `/api/v1/venvs/{id}` | Get venv details (including installed packages) |
+| `GET` | `/api/v1/venvs` | List all virtual environments |
+| `POST` | `/api/v1/venvs` | Create a named standalone venv (specify Python version) |
+| `GET` | `/api/v1/venvs/{id}` | Get venv details |
+| `GET` | `/api/v1/venvs/{id}/packages` | List packages installed in a venv (live `pip list`) |
 | `DELETE` | `/api/v1/venvs/{id}` | Delete a custom venv |
-| `POST` | `/api/v1/venvs/{id}/toggle` | Toggle custom venv active/inactive |
+| `GET` | `/api/v1/jobs/{id}/venv/info` | Get the venv currently assigned to a job |
+| `POST` | `/api/v1/jobs/{id}/venv/toggle` | Toggle job between main venv and its own custom venv |
+| `DELETE` | `/api/v1/jobs/{id}/venv` | Delete job-associated custom venv |
 
 ### Queue
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/v1/queue/status` | Current queue status, depth, and dead letter queue info |
+
+### Schedules
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/jobs/{id}/schedule` | Create a cron schedule for a job |
+| `GET` | `/api/v1/jobs/{id}/schedule` | Get schedule for a job |
+| `PUT` | `/api/v1/jobs/{id}/schedule` | Update schedule |
+| `DELETE` | `/api/v1/jobs/{id}/schedule` | Remove schedule |
+| `POST` | `/api/v1/jobs/{id}/schedule/toggle` | Enable/disable schedule |
+| `GET` | `/api/v1/schedules` | List all schedules |
+
+### DAGs (Directed Acyclic Graphs)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/dags` | Create a new DAG workflow |
+| `GET` | `/api/v1/dags` | List all DAGs |
+| `GET` | `/api/v1/dags/{id}` | Get DAG details (with edges) |
+| `PUT` | `/api/v1/dags/{id}` | Update DAG metadata |
+| `DELETE` | `/api/v1/dags/{id}` | Delete a DAG |
+| `POST` | `/api/v1/dags/{id}/edges` | Add an edge between two jobs |
+| `DELETE` | `/api/v1/dags/{dag_id}/edges/{edge_id}` | Remove an edge |
+| `GET` | `/api/v1/dags/{id}/topology` | Get topological levels |
+| `POST` | `/api/v1/dags/{id}/validate` | Validate DAG (cycles, job existence) |
+| `POST` | `/api/v1/dags/{id}/trigger` | Trigger a DAG run |
+| `GET` | `/api/v1/dags/{id}/runs` | List runs for a DAG |
+| `GET` | `/api/v1/dags/{dag_id}/runs/{run_id}` | Get run details (with node statuses) |
+| `POST` | `/api/v1/dags/{dag_id}/runs/{run_id}/cancel` | Cancel a running DAG |
 
 ### Health & Monitoring
 
@@ -231,6 +302,8 @@ serverust-less/
 │   │   ├── packages.rs         # install, uninstall, search, venv status
 │   │   ├── queue.rs            # queue status
 │   │   ├── venvs.rs            # list, get, delete, toggle venvs
+│   │   ├── schedules.rs        # cron schedule CRUD, toggle
+│   │   ├── dags.rs             # DAG CRUD, edges, topology, trigger, runs
 │   │   └── mod.rs              # AppState, router, OpenAPI setup
 │   ├── db/                     # SQLite repositories (sqlx)
 │   │   ├── executions.rs
@@ -241,9 +314,16 @@ serverust-less/
 │   ├── models/                 # Data structs, DTOs, enums
 │   ├── queue/
 │   │   └── manager.rs          # QueueManager: priority heap + SQLite overflow + DLQ + recovery
+│   ├── scheduler/
+│   │   └── mod.rs              # SchedulerRunner: background cron tick loop
+│   ├── dag/
+│   │   ├── mod.rs
+│   │   └── engine.rs           # DagEngine: trigger, advance, cancel DAG runs
 │   ├── services/               # Business logic layer
 │   │   ├── execution_service.rs
 │   │   ├── job_service.rs
+│   │   ├── schedule_service.rs # Cron validation, next-run calculation
+│   │   ├── dag_service.rs      # Cycle detection, topology, DAG CRUD
 │   │   └── mod.rs
 │   ├── worker/
 │   │   ├── pool.rs             # WorkerPool: concurrent job executors
@@ -256,14 +336,14 @@ serverust-less/
 │   ├── error.rs                # Unified error type
 │   ├── lib.rs                  # Crate exports
 │   └── main.rs                 # Startup: DB, migrations, queue recovery, retention scheduler, worker pool, HTTP server
-├── migrations/                 # SQLite schema migrations (15 files)
+├── migrations/                 # SQLite schema migrations (18 files)
 ├── web/                        # Web UI (HTML / CSS / vanilla JS SPA)
 │   ├── index.html
 │   ├── css/
 │   └── js/
 │       ├── api.js              # API client
 │       ├── app.js              # SPA router and layout
-│       └── components/         # UI components (job-list, execution-history, packages, venvs)
+│       └── components/         # UI components (job-list, job-form, execution-history, packages, venvs, queue)
 ├── config/
 │   └── default.toml            # Default configuration
 ├── venvs/                      # Python virtual environments (auto-created)
@@ -285,6 +365,35 @@ cargo clippy
 # Tests
 cargo test
 ```
+
+## Testing
+
+The project includes a comprehensive integration test suite organized into five test files. All tests use in-memory SQLite databases, so no external infrastructure is required.
+
+```bash
+# Run all tests
+cargo test
+
+# Run a specific test suite
+cargo test --test error_scenarios
+cargo test --test cancellation_tests
+cargo test --test conflict_resolution_tests
+cargo test --test performance_tests
+
+# Run with output (see timing info from performance tests)
+cargo test --test performance_tests -- --nocapture
+```
+
+### Test Suites
+
+| File | Category | Tests | Description |
+|---|---|---|---|
+| `tests/api_tests.rs` | Integration | 5 | Core API smoke tests — health, workers, queue status, CRUD, executions |
+| `tests/api_endpoint_coverage.rs` | Coverage | 4 | Full endpoint coverage for all route groups |
+| `tests/error_scenarios.rs` | Error handling | 20+ | 404 on missing resources, 422 on invalid input, disabled-job execution, bulk edge cases, pagination boundaries |
+| `tests/cancellation_tests.rs` | Lifecycle | 7 | Cancel pending, reject double-cancel, retry cancelled, max-retry enforcement, multi-execution cancel |
+| `tests/conflict_resolution_tests.rs` | Dependencies | 10+ | Dependency CRUD, status tracking, "fail" conflict strategy, cross-job isolation, package validation |
+| `tests/performance_tests.rs` | Performance | 8 | Concurrent creation, bulk delete, pagination walkthrough, rapid CRUD cycles, health under load |
 
 ## Logging
 

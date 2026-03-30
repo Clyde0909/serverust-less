@@ -1,0 +1,1 @@
+include!("../test/api_endpoint_coverage.rs");

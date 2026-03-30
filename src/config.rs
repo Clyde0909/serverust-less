@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
 }
 
 /// Server configuration
@@ -150,6 +152,15 @@ pub struct SecurityConfig {
     pub blocked_packages: Vec<String>,
 }
 
+/// Scheduler configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct SchedulerConfig {
+    #[serde(default = "default_tick_interval")]
+    pub tick_interval_seconds: u64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 // Default value functions
 fn default_host() -> String { "127.0.0.1".to_string() }
 fn default_port() -> u16 { 8080 }
@@ -177,6 +188,7 @@ fn default_log_max_size() -> usize { 1048576 }
 fn default_cleanup_interval() -> u32 { 24 }
 fn default_cors_max_age() -> u64 { 3600 }
 fn default_true() -> bool { true }
+fn default_tick_interval() -> u64 { 10 }
 
 impl Default for CorsConfig {
     fn default() -> Self {
@@ -250,6 +262,15 @@ impl Default for SecurityConfig {
     }
 }
 
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            tick_interval_seconds: default_tick_interval(),
+            enabled: true,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -276,6 +297,7 @@ impl Default for AppConfig {
             packages: PackagesConfig::default(),
             retention: RetentionConfig::default(),
             security: SecurityConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }

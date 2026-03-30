@@ -24,6 +24,8 @@ pub struct Job {
     pub memory_limit_mb: i32,
     /// Whether to use a custom virtual environment
     pub use_custom_venv: bool,
+    /// Selected venv ID (None = main venv)
+    pub venv_id: Option<String>,
     /// Job priority (higher = more priority)
     pub priority: i32,
     /// Maximum retry attempts
@@ -59,6 +61,8 @@ pub struct CreateJobRequest {
     /// Whether to use a custom virtual environment (default: false)
     #[serde(default)]
     pub use_custom_venv: bool,
+    /// Venv ID to use for this job (None = main venv)
+    pub venv_id: Option<String>,
     /// Job priority (default: 0, range: -100 to 100)
     #[serde(default)]
     #[validate(range(min = -100, max = 100, message = "Priority must be -100 to 100"))]
@@ -89,6 +93,8 @@ pub struct UpdateJobRequest {
     pub memory_limit_mb: Option<i32>,
     /// Whether to use a custom virtual environment
     pub use_custom_venv: Option<bool>,
+    /// Venv ID to use for this job (None = main venv, "" clears selection)
+    pub venv_id: Option<String>,
     /// Job priority (range: -100 to 100)
     #[validate(range(min = -100, max = 100, message = "Priority must be -100 to 100"))]
     pub priority: Option<i32>,
@@ -170,11 +176,12 @@ impl Job {
             timeout_seconds: req.timeout_seconds,
             memory_limit_mb: req.memory_limit_mb,
             use_custom_venv: req.use_custom_venv,
+            venv_id: req.venv_id.clone(),
             priority: req.priority,
             max_retries: req.max_retries,
             created_at: now.clone(),
             updated_at: now,
-            enabled: true,
+            enabled: false,
         }
     }
 
@@ -197,6 +204,12 @@ impl Job {
         }
         if let Some(use_custom_venv) = req.use_custom_venv {
             self.use_custom_venv = use_custom_venv;
+        }
+        // Empty string means "clear venv selection" (use main)
+        match req.venv_id {
+            Some(ref v) if v.is_empty() => self.venv_id = None,
+            Some(v) => self.venv_id = Some(v),
+            None => {}
         }
         if let Some(priority) = req.priority {
             self.priority = priority;

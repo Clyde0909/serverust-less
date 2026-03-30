@@ -25,6 +25,11 @@ impl VenvManager {
         self.base_path.join("main")
     }
 
+    /// Expose the configured default Python executable
+    pub fn python_executable(&self) -> &str {
+        &self.python_executable
+    }
+
     /// Get the path for a job-specific venv
     pub fn job_venv_path(&self, job_id: &str) -> PathBuf {
         self.base_path.join(format!("job-{}", job_id))
@@ -59,6 +64,11 @@ impl VenvManager {
 
     /// Create a virtual environment at the specified path
     async fn create_venv(&self, path: &Path) -> Result<(), String> {
+        self.create_venv_with_python(path, &self.python_executable.clone()).await
+    }
+
+    /// Create a virtual environment at the specified path using a given Python executable
+    async fn create_venv_with_python(&self, path: &Path, python_exe: &str) -> Result<(), String> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -66,9 +76,9 @@ impl VenvManager {
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
         }
 
-        info!("Creating virtual environment at {:?}", path);
+        info!("Creating virtual environment at {:?} with {}", path, python_exe);
 
-        let output = Command::new(&self.python_executable)
+        let output = Command::new(python_exe)
             .args(["-m", "venv", path.to_str().unwrap()])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -95,6 +105,90 @@ impl VenvManager {
             info!("Deleted virtual environment at {:?}", path);
         }
         Ok(())
+    }
+
+    /// Get the path for a standalone named venv
+    pub fn named_venv_path(&self, name: &str) -> PathBuf {
+        self.base_path.join(name)
+    }
+
+    /// Check if a named venv exists
+    pub fn named_venv_exists(&self, name: &str) -> bool {
+        let path = self.named_venv_path(name);
+        self.get_python_path(&path).exists()
+    }
+
+    /// Create a standalone named virtual environment
+    pub async fn create_named_venv(&self, name: &str) -> Result<PathBuf, String> {
+        self.create_named_venv_with_python(name, &self.python_executable.clone()).await
+    }
+
+    /// Create a standalone named virtual environment using a specific Python executable
+    pub async fn create_named_venv_with_python(&self, name: &str, python_exe: &str) -> Result<PathBuf, String> {
+        let venv_path = self.named_venv_path(name);
+        if self.get_python_path(&venv_path).exists() {
+            return Err(format!("Virtual environment '{}' already exists", name));
+        }
+        self.create_venv_with_python(&venv_path, python_exe).await?;
+        Ok(venv_path)
+    }
+
+    /// Resolve the Python executable for a given version hint (e.g. "3.11" -> "python3.11")
+    /// Resolve the Python executable for a given version hint (e.g. "3.11" -> "python3.11").
+    /// Only tries version-specific binaries — does NOT fall back to generic `python3`/`python`
+    /// so that a wrong version is never silently used.
+    pub async fn resolve_python_for_version(version: &str) -> Option<String> {
+        let version = version.trim();
+
+        // Parse version parts, e.g. "3.12.3" -> ["3","12","3"], "3.12" -> ["3","12"], "12" -> ["12"]
+        let parts: Vec<&str> = version.split('.').collect();
+
+        // Build SPECIFIC candidates only — no generic python3/python fallbacks
+        let mut candidates: Vec<String> = match parts.as_slice() {
+            [major, minor, _patch, ..] => {
+                // "3.12.3" or "3.12.3.0" -> try python3.12
+                vec![format!("python{}.{}", major, minor)]
+            }
+            [major, minor] => {
+                // "3.12" -> try python3.12
+                vec![format!("python{}.{}", major, minor)]
+            }
+            [only] => {
+                // "12" (just minor) -> try python3.12 then python12
+                // "3" (just major) -> try python3
+                if only.len() <= 3 && only.chars().all(|c| c.is_ascii_digit()) {
+                    if only.parse::<u32>().unwrap_or(0) >= 4 {
+                        // Looks like a minor version (4+), assume Python 3.x
+                        vec![format!("python3.{}", only), format!("python{}", only)]
+                    } else {
+                        // Looks like a major version (1-3)
+                        vec![format!("python{}", only)]
+                    }
+                } else {
+                    vec![format!("python{}", only)]
+                }
+            }
+            _ => vec![format!("python{}", version)],
+        };
+
+        // Deduplicate preserving order
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|c| seen.insert(c.clone()));
+
+        for candidate in &candidates {
+            if let Ok(output) = Command::new(candidate)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    return Some(candidate.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Delete a job-specific venv

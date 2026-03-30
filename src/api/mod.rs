@@ -1,10 +1,12 @@
 //! API layer module
 
+pub mod dags;
 pub mod executions;
 pub mod health;
 pub mod jobs;
 pub mod packages;
 pub mod queue;
+pub mod schedules;
 pub mod venvs;
 
 use axum::Router;
@@ -15,11 +17,13 @@ use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::dag::DagEngine;
 use crate::queue::QueueManager;
 use crate::services::{
-    AuditService, ExecutionService, JobService, PackageService, QueueService, VenvService,
+    AuditService, DagService, ExecutionService, JobService, PackageService, QueueService,
+    ScheduleService, VenvService,
 };
-use crate::worker::ProcessManager;
+use crate::worker::{ProcessManager, VenvManager};
 
 /// Application state shared across handlers
 #[derive(Clone)]
@@ -30,12 +34,18 @@ pub struct AppState {
     pub venv_service: VenvService,
     pub queue_service: QueueService,
     pub audit_service: AuditService,
+    pub schedule_service: ScheduleService,
+    pub dag_service: DagService,
     /// Shared queue manager — API handlers enqueue here, workers dequeue from here.
     pub queue_manager: Arc<QueueManager>,
     /// Process manager — used by cancel handlers to kill running executions.
     pub process_manager: Arc<ProcessManager>,
     /// Total number of worker tasks in the pool (for monitoring).
     pub worker_pool_size: usize,
+    /// Venv manager — used by venv creation endpoint.
+    pub venv_manager: Arc<VenvManager>,
+    /// DAG engine — used by DAG trigger/callback endpoints.
+    pub dag_engine: Option<Arc<DagEngine>>,
 }
 
 /// OpenAPI documentation
@@ -81,6 +91,7 @@ pub struct AppState {
         packages::search_pypi,
         // Venvs
         venvs::list_venvs,
+        venvs::create_venv,
         venvs::get_venv,
         venvs::delete_venv,
         venvs::get_job_venv_info,
@@ -92,6 +103,27 @@ pub struct AppState {
         health::health_check,
         health::get_stats,
         health::get_workers_status,
+        // Schedules
+        schedules::create_schedule,
+        schedules::get_schedule,
+        schedules::update_schedule,
+        schedules::delete_schedule,
+        schedules::toggle_schedule,
+        schedules::list_schedules,
+        // DAGs
+        dags::create_dag,
+        dags::list_dags,
+        dags::get_dag,
+        dags::update_dag,
+        dags::delete_dag,
+        dags::add_edge,
+        dags::delete_edge,
+        dags::get_topology,
+        dags::validate_dag,
+        dags::trigger_dag,
+        dags::list_dag_runs,
+        dags::get_dag_run,
+        dags::cancel_dag_run,
     ),
     components(
         schemas(
@@ -124,6 +156,7 @@ pub struct AppState {
             crate::models::Venv,
             crate::models::VenvListResponse,
             crate::models::JobVenvInfo,
+            crate::models::CreateVenvRequest,
             // Queue schemas
             crate::models::QueueStatusResponse,
             crate::models::PriorityCount,
@@ -136,6 +169,25 @@ pub struct AppState {
             packages::PyPiSearchResult,
             // Error schemas
             crate::error::ErrorResponse,
+            // Schedule schemas
+            crate::models::JobSchedule,
+            crate::models::CreateScheduleRequest,
+            crate::models::UpdateScheduleRequest,
+            crate::models::ScheduleListResponse,
+            // DAG schemas
+            crate::models::Dag,
+            crate::models::DagEdge,
+            crate::models::DagRun,
+            crate::models::DagNodeExecution,
+            crate::models::CreateDagRequest,
+            crate::models::UpdateDagRequest,
+            crate::models::AddEdgeRequest,
+            crate::models::DagDetailResponse,
+            crate::models::DagListResponse,
+            crate::models::DagRunDetailResponse,
+            crate::models::DagRunListResponse,
+            crate::models::TopologyResponse,
+            crate::models::DagValidationResponse,
         )
     ),
     tags(
@@ -144,7 +196,9 @@ pub struct AppState {
         (name = "packages", description = "Package management endpoints"),
         (name = "venvs", description = "Virtual environment management endpoints"),
         (name = "queue", description = "Queue management endpoints"),
-        (name = "health", description = "Health and monitoring endpoints")
+        (name = "health", description = "Health and monitoring endpoints"),
+        (name = "schedules", description = "Schedule management endpoints"),
+        (name = "dags", description = "DAG management endpoints")
     ),
     info(
         title = "Serverust-Less API",
@@ -169,6 +223,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(venvs::router())
         .merge(queue::router())
         .merge(health::router())
+        .merge(schedules::router())
+        .merge(dags::router())
         .with_state(Arc::new(state));
 
     // Serve static files from web/ directory

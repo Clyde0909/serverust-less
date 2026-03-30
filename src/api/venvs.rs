@@ -5,20 +5,94 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use serde::Serialize;
 use std::sync::Arc;
 
 use crate::api::AppState;
 use crate::error::AppError;
-use crate::models::{JobVenvInfo, UpdateJobRequest, Venv, VenvListResponse};
+use crate::models::{CreateVenvRequest, JobVenvInfo, UpdateJobRequest, Venv, VenvListResponse};
+use crate::worker::VenvManager;
 
 /// Create the venvs router
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/venvs", get(list_venvs))
+        .route("/venvs", get(list_venvs).post(create_venv))
         .route("/venvs/:id", get(get_venv).delete(delete_venv))
+        .route("/venvs/:id/packages", get(list_venv_packages))
         .route("/jobs/:id/venv/info", get(get_job_venv_info))
         .route("/jobs/:id/venv/toggle", post(toggle_job_venv))
         .route("/jobs/:id/venv", delete(delete_job_venv))
+}
+
+/// Create a new standalone virtual environment
+#[utoipa::path(
+    post,
+    path = "/api/v1/venvs",
+    tag = "venvs",
+    request_body = CreateVenvRequest,
+    responses(
+        (status = 201, description = "Venv created", body = Venv),
+        (status = 400, description = "Invalid request or name already exists")
+    )
+)]
+pub async fn create_venv(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateVenvRequest>,
+) -> Result<(axum::http::StatusCode, Json<Venv>), AppError> {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Venv name cannot be empty".to_string()));
+    }
+    // Reject reserved name
+    if name == "main" {
+        return Err(AppError::BadRequest("'main' is a reserved name".to_string()));
+    }
+    // Simple path-safety check
+    if name.contains('/') || name.contains('\\') || name.contains('.') {
+        return Err(AppError::BadRequest("Venv name must not contain path separators or dots".to_string()));
+    }
+
+    // Check filesystem collision
+    if state.venv_manager.named_venv_exists(&name) {
+        return Err(AppError::BadRequest(format!("Virtual environment '{}' already exists on disk", name)));
+    }
+
+    // Create on disk — use version-resolved Python binary if requested
+    let python_exe = if let Some(ref version_hint) = req.python_version {
+        VenvManager::resolve_python_for_version(version_hint)
+            .await
+            .ok_or_else(|| AppError::BadRequest(format!(
+                "No Python executable found for version '{}'", version_hint
+            )))?
+    } else {
+        // No version hint → fall back to default binary (same as create_named_venv)
+        state.venv_manager.python_executable().to_string()
+    };
+
+    let venv_path = state
+        .venv_manager
+        .create_named_venv_with_python(&name, &python_exe)
+        .await
+        .map_err(|e| AppError::Internal(e))?;
+
+    // Detect Python version
+    let python_version = state
+        .venv_manager
+        .get_python_version(&venv_path)
+        .await
+        .ok()
+        .or(req.python_version);
+
+    // Persist record
+    let mut venv = crate::models::Venv::new_standalone(
+        &name,
+        venv_path.to_str().unwrap_or(""),
+        python_version,
+    );
+    venv.mark_ready();
+    let created = state.venv_service.create_standalone_venv(venv).await?;
+
+    Ok((axum::http::StatusCode::CREATED, Json(created)))
 }
 
 /// List all virtual environments
@@ -144,6 +218,7 @@ pub async fn toggle_job_venv(
         timeout_seconds: None,
         memory_limit_mb: None,
         use_custom_venv: Some(new_value),
+        venv_id: None,
         priority: None,
         max_retries: None,
         enabled: None,
@@ -195,4 +270,60 @@ pub async fn delete_job_venv(
             job_id
         ))),
     }
+}
+
+#[derive(Serialize)]
+pub struct VenvPackageItem {
+    name: String,
+    version: String,
+}
+
+#[derive(Serialize)]
+pub struct VenvPackagesResponse {
+    venv_id: String,
+    packages: Vec<VenvPackageItem>,
+    total: usize,
+}
+
+/// List packages installed in a specific virtual environment
+#[utoipa::path(
+    get,
+    path = "/api/v1/venvs/{id}/packages",
+    tag = "venvs",
+    params(
+        ("id" = String, Path, description = "Venv ID")
+    ),
+    responses(
+        (status = 200, description = "List of packages in the venv"),
+        (status = 404, description = "Venv not found")
+    )
+)]
+pub async fn list_venv_packages(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<VenvPackagesResponse>, AppError> {
+    let venv = state.venv_service.get_venv(&id).await?;
+    let venv_path = std::path::Path::new(&venv.path);
+
+    if !venv_path.exists() {
+        return Err(AppError::NotFound(format!("Venv path does not exist: {}", venv.path)));
+    }
+
+    let pairs = state
+        .venv_manager
+        .list_packages(venv_path)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let packages: Vec<VenvPackageItem> = pairs
+        .into_iter()
+        .map(|(name, version)| VenvPackageItem { name, version })
+        .collect();
+    let total = packages.len();
+
+    Ok(Json(VenvPackagesResponse {
+        venv_id: id,
+        packages,
+        total,
+    }))
 }

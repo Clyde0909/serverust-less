@@ -26,11 +26,16 @@ const JobList = {
         }
         
         try {
-            const response = await API.Jobs.list({ limit: 100 });
-            const jobs = response.jobs || response;
+            const [jobsResponse, venvsResponse] = await Promise.all([
+                API.Jobs.list({ limit: 100 }),
+                API.Venvs.list().catch(() => ({ venvs: [] })),
+            ]);
+            const jobs = jobsResponse.jobs || jobsResponse;
+            const venvs = venvsResponse.venvs || venvsResponse || [];
             Logger.info('Loaded', jobs.length, 'jobs');
             this.allJobs = jobs;
             AppState.jobs = jobs;
+            AppState.venvs = venvs;
             this.render(jobs);
         } catch (error) {
             Logger.error('Failed to load jobs:', error);
@@ -78,9 +83,21 @@ const JobList = {
     },
     
     renderJobCard(job) {
-        const venvType = job.use_custom_venv ? 'custom' : 'main';
-        const venvBadgeClass = job.use_custom_venv ? 'badge-warning' : 'badge-info';
-        
+        let venvLabel = 'main';
+        let venvBadgeClass = 'badge-info';
+        if (job.venv_id) {
+            // Try to get venv name from state, fallback to truncated id
+            const venvs = AppState.venvs || [];
+            const venv = venvs.find(v => v.id === job.venv_id);
+            if (venv && venv.path) {
+                const parts = venv.path.replace(/\\/g, '/').split('/');
+                venvLabel = parts[parts.length - 1] || job.venv_id;
+            } else {
+                venvLabel = job.venv_id.slice(0, 8);
+            }
+            venvBadgeClass = 'badge-warning';
+        }
+
         return `
             <div class="card" data-job-id="${job.id}">
                 <div class="card-header">
@@ -92,7 +109,7 @@ const JobList = {
                 ${job.description ? `<p class="card-description">${escapeHtml(job.description)}</p>` : ''}
                 <div class="card-meta">
                     <span class="badge ${venvBadgeClass}" title="Virtual Environment">
-                        🐍 ${venvType} venv
+                        🐍 ${escapeHtml(venvLabel)} venv
                     </span>
                     <span class="badge badge-secondary" title="Timeout">
                         ⏱️ ${job.timeout_seconds}s
@@ -107,18 +124,25 @@ const JobList = {
                     ` : ''}
                 </div>
                 <div class="card-actions">
-                    <button class="btn btn-primary btn-sm" data-action="execute" data-job-id="${job.id}">
-                        <span class="icon">▶️</span> Execute
-                    </button>
-                    <button class="btn btn-secondary btn-sm" data-action="edit" data-job-id="${job.id}">
-                        <span class="icon">✏️</span> Edit
-                    </button>
-                    <button class="btn btn-secondary btn-sm" data-action="view" data-job-id="${job.id}">
-                        <span class="icon">👁️</span> View
-                    </button>
-                    <button class="btn btn-danger btn-sm" data-action="delete" data-job-id="${job.id}">
-                        <span class="icon">🗑️</span>
-                    </button>
+                    <div class="card-actions-primary">
+                        <button class="btn btn-primary btn-sm" data-action="execute" data-job-id="${job.id}">
+                            <span class="icon">▶️</span> Execute
+                        </button>
+                        <button class="btn ${job.enabled ? 'btn-secondary' : 'btn-success'} btn-sm" data-action="toggle-enable" data-job-id="${job.id}">
+                            <span class="icon">${job.enabled ? '🔴' : '🟢'}</span> ${job.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                    </div>
+                    <div class="card-actions-secondary">
+                        <button class="btn btn-secondary btn-icon" data-action="edit" data-job-id="${job.id}" title="Edit">
+                            ✏️
+                        </button>
+                        <button class="btn btn-secondary btn-icon" data-action="view" data-job-id="${job.id}" title="View">
+                            👁️
+                        </button>
+                        <button class="btn btn-danger btn-icon" data-action="delete" data-job-id="${job.id}" title="Delete">
+                            🗑️
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
@@ -127,7 +151,10 @@ const JobList = {
     async handleAction(action, jobId) {
         switch (action) {
             case 'execute':
-                this.openExecuteModal(jobId);
+                await this.openExecuteModal(jobId);
+                break;
+            case 'toggle-enable':
+                await this.toggleEnable(jobId);
                 break;
             case 'edit':
                 await JobForm.openEdit(jobId);
@@ -141,10 +168,23 @@ const JobList = {
         }
     },
     
-    openExecuteModal(jobId) {
+    async openExecuteModal(jobId) {
         const job = this.allJobs.find(j => j.id === jobId);
         if (!job) return;
-        
+
+        // Auto-enable disabled job before executing
+        if (!job.enabled) {
+            try {
+                await API.Jobs.enable(jobId);
+                job.enabled = true;
+                Toast.info('Job enabled', `"${job.name}" has been enabled and will now run`);
+                this.render(this.allJobs);
+            } catch (error) {
+                Toast.error('Failed to enable job', error.message);
+                return;
+            }
+        }
+
         AppState.selectedJob = job;
         document.getElementById('execute-job-name').textContent = `Execute: ${job.name}`;
         document.getElementById('execute-input').value = '';
@@ -189,6 +229,26 @@ const JobList = {
         }
     },
     
+    async toggleEnable(jobId) {
+        const job = this.allJobs.find(j => j.id === jobId);
+        if (!job) return;
+
+        try {
+            if (job.enabled) {
+                await API.Jobs.disable(jobId);
+                job.enabled = false;
+                Toast.success('Job disabled', `"${job.name}" has been disabled`);
+            } else {
+                await API.Jobs.enable(jobId);
+                job.enabled = true;
+                Toast.success('Job enabled', `"${job.name}" has been enabled`);
+            }
+            this.render(this.allJobs);
+        } catch (error) {
+            Toast.error('Failed to update job', error.message);
+        }
+    },
+
     async viewJob(jobId) {
         try {
             const job = await API.Jobs.get(jobId);
@@ -203,9 +263,8 @@ const JobList = {
         const job = this.allJobs.find(j => j.id === jobId);
         if (!job) return;
         
-        if (!confirm(`Are you sure you want to delete "${job.name}"?`)) {
-            return;
-        }
+        const ok = await Confirm.show(`Are you sure you want to delete "${job.name}"?`, { title: 'Delete Job', confirmText: 'Delete' });
+        if (!ok) return;
         
         try {
             await API.Jobs.delete(jobId);

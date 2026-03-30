@@ -192,8 +192,8 @@ impl PartialOrd for QueueItem {
 
 impl PartialEq for QueueItem {
     fn eq(&self, other: &Self) -> bool {
-        // Must be consistent with Ord: equal iff same priority AND same execution_id
-        self.priority == other.priority && self.execution_id == other.execution_id
+        // Two items are the same if they represent the same execution (identity by execution_id)
+        self.execution_id == other.execution_id
     }
 }
 

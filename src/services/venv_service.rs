@@ -27,7 +27,8 @@ impl VenvService {
             return Ok(venv);
         }
 
-        let venv = Venv::new_main(path, python_version);
+        let mut venv = Venv::new_main(path, python_version);
+        venv.mark_ready();
         self.repo.create(&venv).await
     }
 
@@ -94,6 +95,11 @@ impl VenvService {
         }
 
         self.repo.delete(id).await
+    }
+
+    /// Persist a standalone (named) venv record that was already created on disk
+    pub async fn create_standalone_venv(&self, venv: crate::models::Venv) -> Result<crate::models::Venv, AppError> {
+        self.repo.create(&venv).await
     }
 
     /// Count custom venvs

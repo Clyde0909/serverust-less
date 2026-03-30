@@ -57,6 +57,42 @@ const Toast = {
     info(title, message) { this.show('info', title, message); },
 };
 
+// ===== Confirm Dialog =====
+const Confirm = {
+    _resolve: null,
+
+    show(message, { title = 'Confirm', confirmText = 'Confirm', danger = true } = {}) {
+        return new Promise((resolve) => {
+            this._resolve = resolve;
+
+            document.getElementById('confirm-modal-title').textContent = title;
+            document.getElementById('confirm-modal-message').textContent = message;
+
+            const okBtn = document.getElementById('confirm-modal-ok');
+            okBtn.textContent = confirmText;
+            okBtn.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+
+            Modal.open('confirm-modal');
+        });
+    },
+
+    _init() {
+        document.getElementById('confirm-modal-ok')?.addEventListener('click', () => {
+            Modal.close('confirm-modal');
+            if (this._resolve) { this._resolve(true); this._resolve = null; }
+        });
+        document.getElementById('confirm-modal-cancel')?.addEventListener('click', () => {
+            Modal.close('confirm-modal');
+            if (this._resolve) { this._resolve(false); this._resolve = null; }
+        });
+        // backdrop click = cancel
+        document.querySelector('#confirm-modal .modal-backdrop')?.addEventListener('click', () => {
+            Modal.close('confirm-modal');
+            if (this._resolve) { this._resolve(false); this._resolve = null; }
+        });
+    },
+};
+
 // ===== Modal Management =====
 const Modal = {
     open(modalId) {
@@ -203,6 +239,9 @@ function setupEventListeners() {
         Toast.info('Refreshed', 'Data has been refreshed');
     });
     
+    // Init confirm dialog
+    Confirm._init();
+
     // Modal close handlers
     document.querySelectorAll('[data-close-modal]').forEach(btn => {
         btn.addEventListener('click', () => {

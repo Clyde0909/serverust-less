@@ -16,6 +16,7 @@ use crate::queue::QueueManager;
 use crate::worker::executor::JobExecutor;
 use crate::worker::process_manager::ProcessManager;
 use crate::worker::python_runner::PythonRunner;
+use crate::dag::DagEngine;
 
 /// Result reported by each worker after completing an execution.
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ impl WorkerPool {
         execution_repo: ExecutionRepository,
         log_repo: ExecutionLogRepository,
         job_repo: JobRepository,
+        dag_engine: Option<Arc<DagEngine>>,
     ) -> (Self, mpsc::Receiver<WorkerResult>) {
         // Channel sized to accommodate all workers producing results simultaneously.
         let (result_tx, result_rx) = mpsc::channel::<WorkerResult>(pool_size * 4);
@@ -67,6 +69,7 @@ impl WorkerPool {
             let runner = runner.clone();
             let main_venv = main_venv_path.clone();
             let custom_venv_base = custom_venv_base_path.clone();
+            let dag_engine = dag_engine.clone();
 
             let handle = tokio::spawn(async move {
                 info!("Worker {} started", worker_id);
@@ -244,6 +247,16 @@ impl WorkerPool {
                             "Worker {} failed to update queue entry for {}: {}",
                             worker_id, exec_id, e
                         );
+                    }
+
+                    // DAG engine callback: advance DAG run if this is a DAG node
+                    if let Some(ref engine) = dag_engine {
+                        if let Err(e) = engine.on_execution_complete(&exec_id).await {
+                            warn!(
+                                "Worker {} DAG engine callback error for {}: {}",
+                                worker_id, exec_id, e
+                            );
+                        }
                     }
 
                     let _ = log_repo

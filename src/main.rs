@@ -8,12 +8,14 @@ use tracing_subscriber::{fmt, EnvFilter};
 use serverust_less::api::{create_router, AppState};
 use serverust_less::config::AppConfig;
 use serverust_less::db::{
-    init_pool, run_migrations, AuditRepository, ExecutionLogRepository, ExecutionRepository,
-    JobRepository, PackageRepository, QueueRepository, VenvRepository,
+    init_pool, run_migrations, AuditRepository, DagRepository, ExecutionLogRepository,
+    ExecutionRepository, JobRepository, PackageRepository, QueueRepository, ScheduleRepository,
+    VenvRepository,
 };
 use serverust_less::queue::QueueManager;
 use serverust_less::services::{
-    AuditService, ExecutionService, JobService, PackageService, QueueService, VenvService,
+    AuditService, DagService, ExecutionService, JobService, PackageService, QueueService,
+    ScheduleService, VenvService,
 };
 use serverust_less::worker::{PackageManager, ProcessManager, VenvManager, WorkerPool};
 
@@ -142,6 +144,8 @@ async fn main() -> anyhow::Result<()> {
     let venv_repo = VenvRepository::new(pool.clone());
     let queue_repo = QueueRepository::new(pool.clone());
     let audit_repo = AuditRepository::new(pool.clone());
+    let schedule_repo = ScheduleRepository::new(pool.clone());
+    let dag_repo = DagRepository::new(pool.clone());
 
     // -------------------------------------------------------------------------
     // Queue manager — shared between API (enqueue) and worker pool (dequeue)
@@ -168,6 +172,25 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // -------------------------------------------------------------------------
+    // Execution service (created early, needed by DAG engine + worker pool)
+    // -------------------------------------------------------------------------
+    let execution_service = ExecutionService::new(
+        execution_repo.clone(),
+        execution_log_repo.clone(),
+        job_repo.clone(),
+    );
+
+    // -------------------------------------------------------------------------
+    // DAG Engine (created before worker pool so workers get the callback)
+    // -------------------------------------------------------------------------
+    let dag_engine = Arc::new(serverust_less::dag::DagEngine::new(
+        dag_repo.clone(),
+        execution_service.clone(),
+        queue_manager.clone(),
+        job_repo.clone(),
+    ));
+
+    // -------------------------------------------------------------------------
     // Worker pool
     // -------------------------------------------------------------------------
     let (worker_pool, mut result_rx) = WorkerPool::new(
@@ -180,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
         execution_repo.clone(),
         execution_log_repo.clone(),
         job_repo.clone(),
+        Some(dag_engine.clone()),
     );
     info!(
         "Worker pool started with {} workers",
@@ -285,11 +309,6 @@ async fn main() -> anyhow::Result<()> {
     // Services
     // -------------------------------------------------------------------------
     let job_service = JobService::new(job_repo.clone());
-    let execution_service = ExecutionService::new(
-        execution_repo.clone(),
-        execution_log_repo.clone(),
-        job_repo.clone(),
-    );
 
     let venv_manager = Arc::new(VenvManager::new(
         &abs_custom_venv_base_path,
@@ -304,14 +323,62 @@ async fn main() -> anyhow::Result<()> {
     let package_service =
         PackageService::with_config(
             package_repo.clone(),
-            venv_manager,
+            Arc::clone(&venv_manager),
             package_manager_worker,
             config.packages.conflict_resolution.strategy.clone(),
         );
     let venv_service = VenvService::new(venv_repo.clone());
+
+    // Ensure main venv record exists in the database
+    {
+        let python_version = venv_manager
+            .get_python_version(&abs_main_venv_path)
+            .await
+            .ok();
+        match venv_service
+            .ensure_main_venv(abs_main_venv_path.to_str().unwrap_or(""), python_version)
+            .await
+        {
+            Ok(mut venv) => {
+                if !venv.is_ready() {
+                    venv.mark_ready();
+                    if let Err(e) = venv_service.update_venv(&venv).await {
+                        warn!("Failed to mark main venv as ready: {}", e);
+                    }
+                }
+                info!("Main venv record ensured in database");
+            }
+            Err(e) => warn!("Failed to ensure main venv in database: {}", e),
+        }
+    }
+
     let queue_service = QueueService::new(queue_repo.clone());
     let audit_service =
         AuditService::new(audit_repo.clone(), config.security.enable_audit_log);
+
+    let schedule_service = ScheduleService::new(schedule_repo.clone());
+    let dag_service = DagService::new(dag_repo.clone());
+
+    // -------------------------------------------------------------------------
+    // Scheduler (background cron ticker)
+    // -------------------------------------------------------------------------
+    if config.scheduler.enabled {
+        let scheduler_runner = serverust_less::scheduler::SchedulerRunner::new(
+            schedule_repo.clone(),
+            execution_service.clone(),
+            queue_manager.clone(),
+            job_repo.clone(),
+            config.scheduler.tick_interval_seconds,
+        );
+
+        tokio::spawn(async move {
+            scheduler_runner.run().await;
+        });
+
+        info!("Cron scheduler enabled (tick interval: {}s)", config.scheduler.tick_interval_seconds);
+    } else {
+        info!("Cron scheduler disabled");
+    }
 
     // -------------------------------------------------------------------------
     // Application state & router
@@ -323,9 +390,13 @@ async fn main() -> anyhow::Result<()> {
         venv_service,
         queue_service,
         audit_service,
+        schedule_service,
+        dag_service,
         queue_manager,
         process_manager,
         worker_pool_size: config.worker.pool_size,
+        venv_manager,
+        dag_engine: Some(dag_engine),
     };
 
     let app = create_router(state);

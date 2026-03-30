@@ -44,3 +44,8 @@ cleanup_interval_hours = 24
 enable_auth = false
 enable_multitenancy = false
 enable_audit_log = true
+
+# Scheduler
+[scheduler]
+tick_interval_seconds = 10
+enabled = true
