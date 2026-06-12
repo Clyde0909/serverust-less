@@ -2,7 +2,10 @@
 
 use crate::db::JobRepository;
 use crate::error::AppError;
-use crate::models::{CreateJobRequest, Job, JobListResponse, ListJobsQuery, UpdateJobRequest};
+use crate::models::{
+    CreateJobRequest, Job, JobListResponse, JobVersion, JobVersionListResponse, ListJobsQuery,
+    RestoreJobVersionRequest, UpdateJobRequest,
+};
 use tracing::{debug, info, instrument, warn};
 use validator::Validate;
 
@@ -43,7 +46,9 @@ impl JobService {
         info!(job_id = %job.id, job_name = %job.name, "Job created");
 
         // Persist to database
-        self.repo.create(&job).await
+        self.repo
+            .create_with_initial_version(&job, Some("Initial version".to_string()), "create")
+            .await
     }
 
     /// Get a job by ID
@@ -104,12 +109,15 @@ impl JobService {
             }
         }
 
+        let change_summary = req.change_summary.clone();
+
         // Apply updates
         job.apply_update(req);
+        job.current_version += 1;
         info!(job_id = %id, "Job updated");
 
         // Persist changes
-        self.repo.update(&job).await
+        self.repo.update_with_version(&job, change_summary, "update").await
     }
 
     /// Delete a job
@@ -134,6 +142,7 @@ impl JobService {
             priority: None,
             max_retries: None,
             enabled: Some(true),
+            change_summary: Some("Enabled job".to_string()),
         };
         self.update_job(id, update).await
     }
@@ -151,6 +160,7 @@ impl JobService {
             priority: None,
             max_retries: None,
             enabled: Some(false),
+            change_summary: Some("Disabled job".to_string()),
         };
         self.update_job(id, update).await
     }
@@ -202,7 +212,71 @@ impl JobService {
         };
 
         let job = Job::new(req);
-        self.repo.create(&job).await
+        self.repo
+            .create_with_initial_version(
+                &job,
+                Some(format!("Cloned from job {}", source.id)),
+                "clone",
+            )
+            .await
+    }
+
+    /// List immutable versions for a job.
+    pub async fn list_job_versions(&self, id: &str) -> Result<JobVersionListResponse, AppError> {
+        let job = self.repo.get_by_id(id).await?;
+        let versions = self.repo.list_versions(id).await?;
+
+        Ok(JobVersionListResponse {
+            job_id: id.to_string(),
+            current_version: job.current_version,
+            versions,
+        })
+    }
+
+    /// Get a specific immutable job version.
+    pub async fn get_job_version(&self, id: &str, version_number: i32) -> Result<JobVersion, AppError> {
+        let _ = self.repo.get_by_id(id).await?;
+        self.repo.get_version(id, version_number).await
+    }
+
+    /// Restore an older job version as the latest current version.
+    pub async fn restore_job_version(
+        &self,
+        id: &str,
+        version_number: i32,
+        req: Option<RestoreJobVersionRequest>,
+    ) -> Result<Job, AppError> {
+        if let Some(ref restore_req) = req {
+            Validate::validate(restore_req).map_err(|e| {
+                warn!(error = %format_validation_errors(&e), "Job version restore validation failed");
+                AppError::Validation(format_validation_errors(&e))
+            })?;
+        }
+
+        let current_job = self.repo.get_by_id(id).await?;
+        let version = self.repo.get_version(id, version_number).await?;
+
+        let mut restored_job = current_job.clone();
+        restored_job.name = version.name;
+        restored_job.description = version.description;
+        restored_job.python_code = version.python_code;
+        restored_job.timeout_seconds = version.timeout_seconds;
+        restored_job.memory_limit_mb = version.memory_limit_mb;
+        restored_job.use_custom_venv = version.use_custom_venv;
+        restored_job.venv_id = version.venv_id;
+        restored_job.priority = version.priority;
+        restored_job.max_retries = version.max_retries;
+        restored_job.enabled = version.enabled;
+        restored_job.current_version += 1;
+        restored_job.updated_at = chrono::Utc::now().to_rfc3339();
+
+        let change_summary = req
+            .and_then(|restore_req| restore_req.change_summary)
+            .or_else(|| Some(format!("Restored from version {}", version_number)));
+
+        self.repo
+            .update_with_version(&restored_job, change_summary, "restore")
+            .await
     }
 
     /// Count total jobs (efficient)

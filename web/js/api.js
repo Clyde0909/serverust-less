@@ -145,6 +145,30 @@ const JobsAPI = {
             body: job,
         });
     },
+
+    /**
+     * List immutable versions for a job
+     */
+    async listVersions(id) {
+        return request(`/jobs/${id}/versions`);
+    },
+
+    /**
+     * Get a specific immutable job version
+     */
+    async getVersion(id, version) {
+        return request(`/jobs/${id}/versions/${version}`);
+    },
+
+    /**
+     * Restore an older job version as the latest current version
+     */
+    async restoreVersion(id, version, body = {}) {
+        return request(`/jobs/${id}/versions/${version}/restore`, {
+            method: 'POST',
+            body,
+        });
+    },
     
     /**
      * Delete a job
@@ -311,6 +335,13 @@ const PackagesAPI = {
      */
     async search(query) {
         return request(`/packages/search?q=${encodeURIComponent(query)}`);
+    },
+
+    /**
+     * Get rich PyPI metadata for an exact package name
+     */
+    async getPypiDetails(name) {
+        return request(`/packages/pypi/${encodeURIComponent(name)}`);
     },
 
     /**

@@ -5,12 +5,11 @@ use crate::error::AppError;
 use crate::models::{
     AddDependencyRequest, DependencyListResponse, DependencyStatusResponse, InstallPackageRequest,
     JobDependency, PackageCache, PackageInstallStatus, PackageListResponse, PackageStatus,
+    PythonPackage,
 };
 use crate::worker::{PackageManager, VenvManager};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 /// Service for package management
 #[derive(Clone)]
@@ -210,7 +209,20 @@ impl PackageService {
         }
 
         // Update cache with final status
-        self.repo.upsert_cache(&cache).await
+        let cache = self.repo.upsert_cache(&cache).await?;
+
+        // Best-effort metadata persistence to make future PyPI lookups and local search richer.
+        let discovered = PythonPackage::new(&cache.package_name, &cache.version, None);
+        if let Err(err) = self.repo.upsert_package(&discovered).await {
+            warn!(
+                package = %cache.package_name,
+                version = %cache.version,
+                error = %err,
+                "Failed to persist discovered package metadata"
+            );
+        }
+
+        Ok(cache)
     }
 
     /// Get packages in main venv
@@ -280,6 +292,23 @@ impl PackageService {
         self.repo
             .delete_cache("main", None, package_name, version)
             .await
+    }
+
+    /// Persist discovered package metadata for future local search.
+    pub async fn record_discovered_package(
+        &self,
+        package: &PythonPackage,
+    ) -> Result<PythonPackage, AppError> {
+        self.repo.upsert_package(package).await
+    }
+
+    /// Search known package metadata cached in the local database.
+    pub async fn search_known_packages(
+        &self,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<PythonPackage>, AppError> {
+        self.repo.search_packages_by_name(query, limit).await
     }
 
     // ============ Job Dependencies ============

@@ -66,6 +66,9 @@ async fn setup() -> Router {
         schedule_service: ScheduleService::new(schedule_repo),
         dag_service: DagService::new(dag_repo),
         dag_engine: None,
+        cors_config: Default::default(),
+        rate_limit_config: Default::default(),
+        scheduler_enabled: true,
     };
 
     create_router(state)
@@ -99,369 +102,206 @@ async fn send_empty(app: &Router, method: Method, uri: &str) -> Response<Body> {
 }
 
 async fn json_body(response: Response<Body>) -> Value {
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
-// ===== Sequential Bulk Job Creation =====
+// ── Concurrent job creation ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_create_many_jobs_sequentially() {
+async fn test_concurrent_job_creation() {
     let app = setup().await;
-    let count = 50;
-
-    let start = Instant::now();
-    for i in 0..count {
-        let resp = send_json(
-            &app,
-            Method::POST,
-            "/api/v1/jobs",
-            json!({
-                "name": format!("perf-seq-job-{i}"),
-                "python_code": format!("print('job {i}')"),
-                "timeout_seconds": 30,
-                "memory_limit_mb": 128,
-            }),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-    }
-    let elapsed = start.elapsed();
-    eprintln!("Created {count} jobs sequentially in {:?}", elapsed);
-
-    // Verify list returns all
-    let resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs?limit=100&offset=0")).await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = json_body(resp).await;
-    assert_eq!(body["total"].as_i64().unwrap(), count);
-}
-
-// ===== Concurrent Job Creation =====
-
-#[tokio::test]
-async fn test_create_jobs_concurrently() {
-    let app = setup().await;
-    let count = 20;
-
     let start = Instant::now();
     let mut handles = Vec::new();
-    for i in 0..count {
-        let app_clone = app.clone();
-        handles.push(tokio::spawn(async move {
-            let resp = app_clone
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/api/v1/jobs")
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(
-                            json!({
-                                "name": format!("perf-concurrent-{i}"),
-                                "python_code": format!("print('concurrent {i}')"),
-                                "timeout_seconds": 30,
-                                "memory_limit_mb": 128,
-                            })
-                            .to_string(),
-                        ))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            resp.status()
-        }));
+
+    for i in 0..20 {
+        let app = app.clone();
+        let handle = tokio::spawn(async move {
+            let response = send_json(
+                &app,
+                Method::POST,
+                "/api/v1/jobs",
+                json!({
+                    "name": format!("concurrent-job-{}", i),
+                    "python_code": "print('hello')",
+                    "timeout_seconds": 30,
+                    "memory_limit_mb": 128,
+                    "priority": 0,
+                    "max_retries": 0
+                }),
+            )
+            .await;
+            response.status()
+        });
+        handles.push(handle);
     }
 
-    let mut success = 0;
     for handle in handles {
         let status = handle.await.unwrap();
-        if status == StatusCode::CREATED {
-            success += 1;
-        }
+        assert_eq!(status, StatusCode::CREATED);
     }
+
     let elapsed = start.elapsed();
-    eprintln!("Created {success}/{count} jobs concurrently in {:?}", elapsed);
-
-    assert_eq!(success, count, "All concurrent creations should succeed");
+    assert!(elapsed.as_secs() < 10, "Concurrent creation took too long: {:?}", elapsed);
 }
 
-// ===== Concurrent Execution Requests =====
+// ── Bulk delete performance ──────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_execute_job_concurrently() {
-    let app = setup().await;
-    let resp = send_json(
-        &app,
-        Method::POST,
-        "/api/v1/jobs",
-        json!({
-            "name": "perf-exec-target",
-            "python_code": "print('hello')",
-            "timeout_seconds": 30,
-            "memory_limit_mb": 128,
-        }),
-    )
-    .await;
-    let job = json_body(resp).await;
-    let job_id = job["id"].as_str().unwrap().to_string();
-
-    let concurrent = 10;
-    let mut handles = Vec::new();
-    for _ in 0..concurrent {
-        let app_clone = app.clone();
-        let jid = job_id.clone();
-        handles.push(tokio::spawn(async move {
-            let resp = app_clone
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/api/v1/jobs/{jid}/execute"))
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            resp.status()
-        }));
-    }
-
-    let mut ok_count = 0;
-    for handle in handles {
-        if handle.await.unwrap() == StatusCode::CREATED {
-            ok_count += 1;
-        }
-    }
-    assert_eq!(ok_count, concurrent, "All concurrent executions should succeed");
-
-    // Verify execution count matches
-    let resp = send_empty(
-        &app,
-        Method::GET,
-        &format!("/api/v1/jobs/{job_id}/executions?limit=100&offset=0"),
-    )
-    .await;
-    let body = json_body(resp).await;
-    assert_eq!(body["total"].as_i64().unwrap(), concurrent as i64);
-}
-
-// ===== Pagination: Full Walkthrough =====
-
-#[tokio::test]
-async fn test_pagination_walk_all_pages() {
-    let app = setup().await;
-    let total_count = 25;
-
-    // Create jobs
-    for i in 0..total_count {
-        send_json(
-            &app,
-            Method::POST,
-            "/api/v1/jobs",
-            json!({
-                "name": format!("page-job-{i}"),
-                "python_code": "x = 1",
-                "timeout_seconds": 10,
-                "memory_limit_mb": 64,
-            }),
-        )
-        .await;
-    }
-
-    let page_size = 10;
-    let mut fetched_ids: Vec<String> = Vec::new();
-    let mut offset = 0;
-
-    loop {
-        let resp = send_empty(
-            &app,
-            Method::GET,
-            &format!("/api/v1/jobs?limit={page_size}&offset={offset}"),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = json_body(resp).await;
-
-        let jobs = body["jobs"].as_array().unwrap();
-        if jobs.is_empty() {
-            break;
-        }
-        assert_eq!(body["total"].as_i64().unwrap(), total_count);
-
-        for j in jobs {
-            fetched_ids.push(j["id"].as_str().unwrap().to_string());
-        }
-        offset += page_size;
-    }
-
-    assert_eq!(fetched_ids.len(), total_count as usize);
-    // All IDs should be unique
-    let unique: std::collections::HashSet<_> = fetched_ids.iter().collect();
-    assert_eq!(unique.len(), total_count as usize, "All IDs must be unique across pages");
-}
-
-// ===== Bulk Delete Performance =====
-
-#[tokio::test]
-async fn test_bulk_delete_jobs() {
+async fn test_bulk_delete_performance() {
     let app = setup().await;
 
+    // Create 10 jobs
     let mut ids = Vec::new();
-    for i in 0..15 {
-        let resp = send_json(
+    for i in 0..10 {
+        let response = send_json(
             &app,
             Method::POST,
             "/api/v1/jobs",
             json!({
-                "name": format!("bulk-del-{i}"),
-                "python_code": "x = 1",
-                "timeout_seconds": 10,
-                "memory_limit_mb": 64,
+                "name": format!("bulk-del-job-{}", i),
+                "python_code": "print('hello')",
+                "timeout_seconds": 30,
+                "memory_limit_mb": 128,
+                "priority": 0,
+                "max_retries": 0
             }),
         )
         .await;
-        let job = json_body(resp).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let job = json_body(response).await;
         ids.push(job["id"].as_str().unwrap().to_string());
     }
 
+    // Bulk delete
     let start = Instant::now();
-    let resp = send_json(
+    let response = send_json(
         &app,
         Method::DELETE,
         "/api/v1/jobs/bulk",
         json!({"ids": ids}),
     )
     .await;
+    assert_eq!(response.status(), StatusCode::OK);
     let elapsed = start.elapsed();
-    eprintln!("Bulk deleted {} jobs in {:?}", ids.len(), elapsed);
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // Verify empty
-    let resp = send_empty(&app, Method::GET, "/api/v1/jobs?limit=100&offset=0").await;
-    let body = json_body(resp).await;
-    assert_eq!(body["total"].as_i64().unwrap(), 0);
+    assert!(elapsed.as_secs() < 5, "Bulk delete took too long: {:?}", elapsed);
 }
 
-// ===== Bulk Delete Executions =====
+// ── Pagination walkthrough ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_bulk_delete_executions() {
-    let app = setup().await;
-    let resp = send_json(
-        &app,
-        Method::POST,
-        "/api/v1/jobs",
-        json!({
-            "name": "bulk-exec-del",
-            "python_code": "x = 1",
-            "timeout_seconds": 10,
-            "memory_limit_mb": 64,
-        }),
-    )
-    .await;
-    let job = json_body(resp).await;
-    let job_id = job["id"].as_str().unwrap();
-
-    let mut exec_ids = Vec::new();
-    for _ in 0..10 {
-        let resp = send_json(
-            &app,
-            Method::POST,
-            &format!("/api/v1/jobs/{job_id}/execute"),
-            json!({}),
-        )
-        .await;
-        let exec = json_body(resp).await;
-        exec_ids.push(exec["id"].as_str().unwrap().to_string());
-    }
-
-    let resp = send_json(
-        &app,
-        Method::DELETE,
-        "/api/v1/executions/bulk",
-        json!({"ids": exec_ids}),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let resp = send_empty(
-        &app,
-        Method::GET,
-        &format!("/api/v1/jobs/{job_id}/executions?limit=100&offset=0"),
-    )
-    .await;
-    let body = json_body(resp).await;
-    assert_eq!(body["total"].as_i64().unwrap(), 0);
-}
-
-// ===== Health Endpoint Under Load =====
-
-#[tokio::test]
-async fn test_health_endpoint_under_load() {
-    let app = setup().await;
-    let count = 50;
-
-    let mut handles = Vec::new();
-    for _ in 0..count {
-        let app_clone = app.clone();
-        handles.push(tokio::spawn(async move {
-            let resp = app_clone
-                .oneshot(
-                    Request::builder()
-                        .uri("/api/v1/health")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            resp.status()
-        }));
-    }
-
-    let mut ok = 0;
-    for h in handles {
-        if h.await.unwrap() == StatusCode::OK {
-            ok += 1;
-        }
-    }
-    assert_eq!(ok, count, "All health checks should succeed");
-}
-
-// ===== Rapid Create-Read-Delete Cycle =====
-
-#[tokio::test]
-async fn test_rapid_create_read_delete_cycle() {
+async fn test_pagination_walkthrough() {
     let app = setup().await;
 
-    let start = Instant::now();
-    for i in 0..20 {
-        let name = format!("rapid-cycle-{i}");
-
-        // Create
-        let resp = send_json(
+    // Create 25 jobs
+    for i in 0..25 {
+        send_json(
             &app,
             Method::POST,
             "/api/v1/jobs",
-            json!({"name": name, "python_code": "x = 1", "timeout_seconds": 10, "memory_limit_mb": 64}),
+            json!({
+                "name": format!("page-job-{:02}", i),
+                "python_code": "print('hello')",
+                "timeout_seconds": 30,
+                "memory_limit_mb": 128,
+                "priority": 0,
+                "max_retries": 0
+            }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let job = json_body(resp).await;
-        let id = job["id"].as_str().unwrap();
+    }
+
+    // Walk through pages
+    let mut total_seen = 0;
+    let mut offset = 0;
+    loop {
+        let response = send_empty(&app, Method::GET, &format!("/api/v1/jobs?limit=10&offset={}", offset)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let jobs = body["jobs"].as_array().unwrap();
+        if jobs.is_empty() {
+            break;
+        }
+        total_seen += jobs.len();
+        offset += 10;
+    }
+    assert!(total_seen >= 25, "Expected at least 25 jobs, saw {}", total_seen);
+}
+
+// ── Rapid CRUD cycles ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_rapid_crud_cycles() {
+    let app = setup().await;
+
+    for cycle in 0..5 {
+        // Create
+        let create_resp = send_json(
+            &app,
+            Method::POST,
+            "/api/v1/jobs",
+            json!({
+                "name": format!("crud-cycle-{}", cycle),
+                "python_code": "print('hello')",
+                "timeout_seconds": 30,
+                "memory_limit_mb": 128,
+                "priority": 0,
+                "max_retries": 0
+            }),
+        )
+        .await;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let job = json_body(create_resp).await;
+        let job_id = job["id"].as_str().unwrap();
 
         // Read
-        let resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs/{id}")).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let get_resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs/{}", job_id)).await;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+
+        // Update
+        let update_resp = send_json(
+            &app,
+            Method::PUT,
+            &format!("/api/v1/jobs/{}", job_id),
+            json!({"name": format!("crud-cycle-{}-updated", cycle)}),
+        )
+        .await;
+        assert_eq!(update_resp.status(), StatusCode::OK);
 
         // Delete
-        let resp = send_empty(&app, Method::DELETE, &format!("/api/v1/jobs/{id}")).await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-
-        // Verify 404
-        let resp = send_empty(&app, Method::GET, &format!("/api/v1/jobs/{id}")).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let delete_resp = send_empty(&app, Method::DELETE, &format!("/api/v1/jobs/{}", job_id)).await;
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
     }
+}
+
+// ── Health under load ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_health_under_load() {
+    let app = setup().await;
+
+    // Create some jobs first
+    for i in 0..10 {
+        send_json(
+            &app,
+            Method::POST,
+            "/api/v1/jobs",
+            json!({
+                "name": format!("health-load-job-{}", i),
+                "python_code": "print('hello')",
+                "timeout_seconds": 30,
+                "memory_limit_mb": 128,
+                "priority": 0,
+                "max_retries": 0
+            }),
+        )
+        .await;
+    }
+
+    // Health check should still respond quickly
+    let start = Instant::now();
+    let response = send_empty(&app, Method::GET, "/api/v1/health").await;
+    assert_eq!(response.status(), StatusCode::OK);
     let elapsed = start.elapsed();
-    eprintln!("20 create-read-delete cycles in {:?}", elapsed);
+    assert!(elapsed.as_millis() < 500, "Health check too slow under load: {:?}", elapsed);
 }

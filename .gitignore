@@ -1,4 +1,30 @@
-/target
-/data
-/venv
-/venvs
+# Build artifacts
+/target/
+
+# Database
+/data/*.db
+/data/*.db-journal
+/data/*.db-wal
+
+# Virtual environments
+/venvs/
+
+# Pip cache
+/cache/
+
+# Environment files
+.env
+.env.local
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

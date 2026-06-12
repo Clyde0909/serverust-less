@@ -2,20 +2,27 @@
 
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, post, delete},
+    routing::{get, post},
     Json, Router,
 };
 use std::sync::Arc;
 
 use crate::api::AppState;
 use crate::error::AppError;
-use crate::models::{BulkDeleteRequest, BulkOperationResponse, CloneJobRequest, CreateJobRequest, Job, JobListResponse, ListJobsQuery, UpdateJobRequest};
+use crate::models::{
+    BulkDeleteRequest, BulkOperationResponse, CloneJobRequest, CreateJobRequest, Job,
+    JobListResponse, JobVersion, JobVersionListResponse, ListJobsQuery,
+    RestoreJobVersionRequest, UpdateJobRequest,
+};
 
 /// Create the jobs router
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/bulk", post(bulk_create_jobs).delete(bulk_delete_jobs))
+    .route("/jobs/:id/versions", get(list_job_versions))
+    .route("/jobs/:id/versions/:version", get(get_job_version))
+    .route("/jobs/:id/versions/:version/restore", post(restore_job_version))
         .route("/jobs/:id", get(get_job).put(update_job).delete(delete_job))
         .route("/jobs/:id/enable", post(enable_job))
         .route("/jobs/:id/disable", post(disable_job))
@@ -262,4 +269,72 @@ pub async fn clone_job(
     let new_name = req.and_then(|r| r.name);
     let job = state.job_service.clone_job(&id, new_name).await?;
     Ok((axum::http::StatusCode::CREATED, Json(job)))
+}
+
+/// List immutable versions of a job.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}/versions",
+    tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job ID")
+    ),
+    responses(
+        (status = 200, description = "Job versions", body = JobVersionListResponse),
+        (status = 404, description = "Job not found", body = ErrorResponse)
+    )
+)]
+pub async fn list_job_versions(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<JobVersionListResponse>, AppError> {
+    let response = state.job_service.list_job_versions(&id).await?;
+    Ok(Json(response))
+}
+
+/// Get a specific immutable version of a job.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}/versions/{version}",
+    tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job ID"),
+        ("version" = i32, Path, description = "Version number")
+    ),
+    responses(
+        (status = 200, description = "Job version", body = JobVersion),
+        (status = 404, description = "Job or version not found", body = ErrorResponse)
+    )
+)]
+pub async fn get_job_version(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, i32)>,
+) -> Result<Json<JobVersion>, AppError> {
+    let job_version = state.job_service.get_job_version(&id, version).await?;
+    Ok(Json(job_version))
+}
+
+/// Restore an older job version as the latest current version.
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{id}/versions/{version}/restore",
+    tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job ID"),
+        ("version" = i32, Path, description = "Version number to restore")
+    ),
+    request_body = RestoreJobVersionRequest,
+    responses(
+        (status = 200, description = "Restored latest job definition", body = Job),
+        (status = 404, description = "Job or version not found", body = ErrorResponse),
+        (status = 422, description = "Invalid restore request", body = ErrorResponse)
+    )
+)]
+pub async fn restore_job_version(
+    State(state): State<Arc<AppState>>,
+    Path((id, version)): Path<(String, i32)>,
+    Json(req): Json<Option<RestoreJobVersionRequest>>,
+) -> Result<Json<Job>, AppError> {
+    let job = state.job_service.restore_job_version(&id, version, req).await?;
+    Ok(Json(job))
 }

@@ -51,7 +51,7 @@ impl ExecutionService {
         }
 
         let input_data = req.and_then(|r| r.input_data);
-        let execution = Execution::new(job_id, input_data);
+        let execution = Execution::new(job_id, input_data, job.current_version);
         
         info!(
             execution_id = %execution.id,
@@ -201,7 +201,7 @@ impl ExecutionService {
         let input_data = execution
             .input_data
             .and_then(|s| serde_json::from_str(&s).ok());
-        let mut new_execution = Execution::new(&execution.job_id, input_data);
+        let mut new_execution = Execution::new(&execution.job_id, input_data, execution.job_version);
         new_execution.retry_count = execution.retry_count + 1;
 
         self.execution_repo.create(&new_execution).await

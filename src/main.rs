@@ -63,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         cwd.join(&config.database.path)
     };
+    let abs_pip_cache_dir = if config.packages.pip_cache_dir.is_absolute() {
+        config.packages.pip_cache_dir.clone()
+    } else {
+        cwd.join(&config.packages.pip_cache_dir)
+    };
 
     info!(
         host = %config.server.host,
@@ -86,6 +91,11 @@ async fn main() -> anyhow::Result<()> {
     if !abs_custom_venv_base_path.exists() {
         std::fs::create_dir_all(&abs_custom_venv_base_path)?;
         info!("Created venv base directory: {}", abs_custom_venv_base_path.display());
+    }
+
+    if config.packages.enable_pip_cache && !abs_pip_cache_dir.exists() {
+        std::fs::create_dir_all(&abs_pip_cache_dir)?;
+        info!("Created pip cache directory: {}", abs_pip_cache_dir.display());
     }
 
     // -------------------------------------------------------------------------
@@ -314,10 +324,13 @@ async fn main() -> anyhow::Result<()> {
         &abs_custom_venv_base_path,
         &config.worker.python_executable,
     ));
-    let package_manager_worker = Arc::new(PackageManager::new(
+
+    let package_manager_worker = Arc::new(PackageManager::with_index_config(
         config.packages.pip_timeout_seconds,
         config.packages.enable_pip_cache,
-        None,
+        Some(abs_pip_cache_dir.to_string_lossy().to_string()),
+        Some(config.packages.pip_index_url.clone()),
+        config.packages.pip_trusted_hosts.clone(),
     ));
 
     let package_service =
@@ -397,6 +410,9 @@ async fn main() -> anyhow::Result<()> {
         worker_pool_size: config.worker.pool_size,
         venv_manager,
         dag_engine: Some(dag_engine),
+        cors_config: config.server.cors.clone(),
+        rate_limit_config: config.server.rate_limit.clone(),
+        scheduler_enabled: config.scheduler.enabled,
     };
 
     let app = create_router(state);

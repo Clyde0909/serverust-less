@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 use tracing::{debug, instrument, trace};
 
 use crate::error::AppError;
-use crate::models::{Job, ListJobsQuery};
+use crate::models::{Job, JobVersion, ListJobsQuery};
 
 /// Repository for job database operations
 #[derive(Clone)]
@@ -26,8 +26,8 @@ impl JobRepository {
             r#"
             INSERT INTO jobs (
                 id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&job.id)
@@ -40,6 +40,7 @@ impl JobRepository {
         .bind(&job.venv_id)
         .bind(job.priority)
         .bind(job.max_retries)
+        .bind(job.current_version)
         .bind(&job.created_at)
         .bind(&job.updated_at)
         .bind(job.enabled)
@@ -58,7 +59,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
             FROM jobs
             WHERE id = ?
             "#,
@@ -77,7 +78,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
             FROM jobs
             WHERE name = ?
             "#,
@@ -93,7 +94,7 @@ impl JobRepository {
         let mut sql_query = String::from(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
             FROM jobs
             WHERE 1=1
             "#,
@@ -153,7 +154,7 @@ impl JobRepository {
             UPDATE jobs
             SET name = ?, description = ?, python_code = ?, timeout_seconds = ?,
                 memory_limit_mb = ?, use_custom_venv = ?, venv_id = ?, priority = ?, max_retries = ?,
-                updated_at = ?, enabled = ?
+                current_version = ?, updated_at = ?, enabled = ?
             WHERE id = ?
             "#,
         )
@@ -166,6 +167,7 @@ impl JobRepository {
         .bind(&job.venv_id)
         .bind(job.priority)
         .bind(job.max_retries)
+        .bind(job.current_version)
         .bind(&job.updated_at)
         .bind(job.enabled)
         .bind(&job.id)
@@ -178,6 +180,191 @@ impl JobRepository {
         }
 
         self.get_by_id(&job.id).await
+    }
+
+    /// Create a job and its initial immutable version snapshot in a single transaction.
+    pub async fn create_with_initial_version(
+        &self,
+        job: &Job,
+        change_summary: Option<String>,
+        source: &str,
+    ) -> Result<Job, AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO jobs (
+                id, name, description, python_code, timeout_seconds, memory_limit_mb,
+                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&job.id)
+        .bind(&job.name)
+        .bind(&job.description)
+        .bind(&job.python_code)
+        .bind(job.timeout_seconds)
+        .bind(job.memory_limit_mb)
+        .bind(job.use_custom_venv)
+        .bind(&job.venv_id)
+        .bind(job.priority)
+        .bind(job.max_retries)
+        .bind(job.current_version)
+        .bind(&job.created_at)
+        .bind(&job.updated_at)
+        .bind(job.enabled)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        self.insert_version_snapshot_tx(&mut tx, job, change_summary, source)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        self.get_by_id(&job.id).await
+    }
+
+    /// Update a job and persist a new immutable version snapshot in a single transaction.
+    pub async fn update_with_version(
+        &self,
+        job: &Job,
+        change_summary: Option<String>,
+        source: &str,
+    ) -> Result<Job, AppError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE jobs
+            SET name = ?, description = ?, python_code = ?, timeout_seconds = ?,
+                memory_limit_mb = ?, use_custom_venv = ?, venv_id = ?, priority = ?, max_retries = ?,
+                current_version = ?, updated_at = ?, enabled = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(&job.name)
+        .bind(&job.description)
+        .bind(&job.python_code)
+        .bind(job.timeout_seconds)
+        .bind(job.memory_limit_mb)
+        .bind(job.use_custom_venv)
+        .bind(&job.venv_id)
+        .bind(job.priority)
+        .bind(job.max_retries)
+        .bind(job.current_version)
+        .bind(&job.updated_at)
+        .bind(job.enabled)
+        .bind(&job.id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!("Job not found: {}", job.id)));
+        }
+
+        self.insert_version_snapshot_tx(&mut tx, job, change_summary, source)
+            .await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        self.get_by_id(&job.id).await
+    }
+
+    async fn insert_version_snapshot_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        job: &Job,
+        change_summary: Option<String>,
+        source: &str,
+    ) -> Result<JobVersion, AppError> {
+        let version = JobVersion::from_job(job, change_summary, source);
+
+        sqlx::query(
+            r#"
+            INSERT INTO job_versions (
+                id, job_id, version_number, name, description, python_code, timeout_seconds,
+                memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
+                created_at, change_summary, source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&version.id)
+        .bind(&version.job_id)
+        .bind(version.version_number)
+        .bind(&version.name)
+        .bind(&version.description)
+        .bind(&version.python_code)
+        .bind(version.timeout_seconds)
+        .bind(version.memory_limit_mb)
+        .bind(version.use_custom_venv)
+        .bind(&version.venv_id)
+        .bind(version.priority)
+        .bind(version.max_retries)
+        .bind(version.enabled)
+        .bind(&version.created_at)
+        .bind(&version.change_summary)
+        .bind(&version.source)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        Ok(version)
+    }
+
+    /// List all immutable versions for a job, newest first.
+    pub async fn list_versions(&self, job_id: &str) -> Result<Vec<JobVersion>, AppError> {
+        sqlx::query_as::<_, JobVersion>(
+            r#"
+            SELECT id, job_id, version_number, name, description, python_code, timeout_seconds,
+                   memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
+                   created_at, change_summary, source
+            FROM job_versions
+            WHERE job_id = ?
+            ORDER BY version_number DESC
+            "#,
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    /// Get a specific immutable version for a job.
+    pub async fn get_version(&self, job_id: &str, version_number: i32) -> Result<JobVersion, AppError> {
+        sqlx::query_as::<_, JobVersion>(
+            r#"
+            SELECT id, job_id, version_number, name, description, python_code, timeout_seconds,
+                   memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
+                   created_at, change_summary, source
+            FROM job_versions
+            WHERE job_id = ? AND version_number = ?
+            "#,
+        )
+        .bind(job_id)
+        .bind(version_number)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "Job version not found: job_id={}, version={}"
+                , job_id, version_number
+            ))
+        })
     }
 
     /// Delete a job by ID

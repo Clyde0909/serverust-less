@@ -22,13 +22,14 @@ impl ExecutionRepository {
         sqlx::query(
             r#"
             INSERT INTO executions (
-                id, job_id, status, input_data, output_data, error_message,
+                id, job_id, job_version, status, input_data, output_data, error_message,
                 retry_count, worker_id, started_at, completed_at, duration_ms, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&execution.id)
         .bind(&execution.job_id)
+        .bind(execution.job_version)
         .bind(&execution.status)
         .bind(&execution.input_data)
         .bind(&execution.output_data)
@@ -50,7 +51,7 @@ impl ExecutionRepository {
     pub async fn get_by_id(&self, id: &str) -> Result<Execution, AppError> {
         sqlx::query_as::<_, Execution>(
             r#"
-            SELECT id, job_id, status, input_data, output_data, error_message,
+                 SELECT id, job_id, job_version, status, input_data, output_data, error_message,
                    retry_count, worker_id, started_at, completed_at, duration_ms, created_at
             FROM executions
             WHERE id = ?
@@ -67,7 +68,7 @@ impl ExecutionRepository {
     pub async fn list(&self, query: &ListExecutionsQuery) -> Result<(Vec<Execution>, i64), AppError> {
         let mut sql_query = String::from(
             r#"
-            SELECT id, job_id, status, input_data, output_data, error_message,
+                 SELECT id, job_id, job_version, status, input_data, output_data, error_message,
                    retry_count, worker_id, started_at, completed_at, duration_ms, created_at
             FROM executions
             WHERE 1=1
@@ -155,7 +156,7 @@ impl ExecutionRepository {
 
         let executions = sqlx::query_as::<_, Execution>(
             r#"
-            SELECT id, job_id, status, input_data, output_data, error_message,
+                 SELECT id, job_id, job_version, status, input_data, output_data, error_message,
                    retry_count, worker_id, started_at, completed_at, duration_ms, created_at
             FROM executions
             WHERE job_id = ?
@@ -247,7 +248,7 @@ impl ExecutionRepository {
     pub async fn get_running(&self) -> Result<Vec<Execution>, AppError> {
         sqlx::query_as::<_, Execution>(
             r#"
-            SELECT id, job_id, status, input_data, output_data, error_message,
+                 SELECT id, job_id, job_version, status, input_data, output_data, error_message,
                    retry_count, worker_id, started_at, completed_at, duration_ms, created_at
             FROM executions
             WHERE status = 'running'
@@ -264,7 +265,7 @@ impl ExecutionRepository {
     pub async fn get_retriable(&self) -> Result<Vec<Execution>, AppError> {
         sqlx::query_as::<_, Execution>(
             r#"
-            SELECT e.id, e.job_id, e.status, e.input_data, e.output_data, e.error_message,
+                 SELECT e.id, e.job_id, e.job_version, e.status, e.input_data, e.output_data, e.error_message,
                    e.retry_count, e.worker_id, e.started_at, e.completed_at, e.duration_ms, e.created_at
             FROM executions e
             JOIN jobs j ON e.job_id = j.id
@@ -281,7 +282,7 @@ impl ExecutionRepository {
     pub async fn get_pending(&self) -> Result<Option<Execution>, AppError> {
         sqlx::query_as::<_, Execution>(
             r#"
-            SELECT id, job_id, status, input_data, output_data, error_message,
+                 SELECT id, job_id, job_version, status, input_data, output_data, error_message,
                    retry_count, worker_id, started_at, completed_at, duration_ms, created_at
             FROM executions
             WHERE status = 'pending'

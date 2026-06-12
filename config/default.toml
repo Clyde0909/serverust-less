@@ -4,6 +4,19 @@ host = "0.0.0.0"
 port = 8080
 log_level = "info"
 
+# CORS configuration
+[server.cors]
+enabled = true
+allowed_origins = ["http://localhost:3000", "http://localhost:8080"]
+allowed_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+max_age_seconds = 3600
+
+# Rate limiting configuration
+[server.rate_limit]
+enabled = true
+requests_per_second = 100
+burst_size = 200
+
 # Database configuration
 [database]
 path = "./data/serverust.db"
@@ -15,6 +28,8 @@ pool_size = 4
 default_timeout_seconds = 30
 default_memory_limit_mb = 128
 python_executable = "python3.12"
+python_version = "3.12"
+enable_process_isolation = true
 graceful_shutdown_seconds = 30
 
 # Queue configuration
@@ -32,6 +47,16 @@ pip_cache_dir = "./cache/pip"
 max_cache_size_mb = 5000
 max_custom_venvs = 50
 pip_timeout_seconds = 300
+enable_pip_cache = true
+auto_install_dependencies = true
+allow_prerelease = false
+auto_suggest_custom_venv = true
+pip_index_url = "https://pypi.org/simple"
+pip_trusted_hosts = []
+
+# Package conflict resolution strategy
+[packages.conflict_resolution]
+strategy = "suggest_custom_venv"
 
 # Data retention
 [retention]
@@ -44,6 +69,7 @@ cleanup_interval_hours = 24
 enable_auth = false
 enable_multitenancy = false
 enable_audit_log = true
+blocked_packages = []
 
 # Scheduler
 [scheduler]

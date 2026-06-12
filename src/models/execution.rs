@@ -69,6 +69,8 @@ pub struct Execution {
     pub id: String,
     /// Associated job ID
     pub job_id: String,
+    /// Immutable job version that this execution will run
+    pub job_version: i32,
     /// Current status
     pub status: String,
     /// Input data (JSON)
@@ -146,11 +148,12 @@ fn default_limit() -> i32 {
 
 impl Execution {
     /// Create a new execution for a job
-    pub fn new(job_id: &str, input_data: Option<serde_json::Value>) -> Self {
+    pub fn new(job_id: &str, input_data: Option<serde_json::Value>, job_version: i32) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
             id: Uuid::new_v4().to_string(),
             job_id: job_id.to_string(),
+            job_version,
             status: ExecutionStatus::Pending.as_str().to_string(),
             input_data: input_data.map(|v| v.to_string()),
             output_data: None,

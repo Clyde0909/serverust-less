@@ -65,6 +65,28 @@ impl PackageRepository {
         .map_err(|e| AppError::Database(e.to_string()))
     }
 
+    /// Search known package metadata by partial name match.
+    pub async fn search_packages_by_name(
+        &self,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<PythonPackage>, AppError> {
+        sqlx::query_as::<_, PythonPackage>(
+            r#"
+            SELECT id, name, version, description, pypi_url, created_at
+            FROM python_packages
+            WHERE LOWER(name) LIKE LOWER(?)
+            ORDER BY created_at DESC, name ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(format!("%{}%", query.trim()))
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
     // ============ Job Dependencies ============
 
     /// Add a dependency to a job

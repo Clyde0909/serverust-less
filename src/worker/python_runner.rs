@@ -567,9 +567,6 @@ INPUT_DATA = json.loads('''{}''')
         let stdout_handle = child.stdout.take();
         let stderr_handle = child.stderr.take();
 
-        let mut all_stdout = String::new();
-        let mut all_stderr = String::new();
-
         // Create channels for streaming
         let (tx, mut rx) = tokio::sync::mpsc::channel::<OutputLine>(100);
 
@@ -631,8 +628,8 @@ INPUT_DATA = json.loads('''{}''')
         };
 
         // Collect final output
-        all_stdout = stdout_task.await.unwrap_or_default();
-        all_stderr = stderr_task.await.unwrap_or_default();
+        let all_stdout = stdout_task.await.unwrap_or_default();
+        let all_stderr = stderr_task.await.unwrap_or_default();
         let _ = output_task.await;
 
         let memory_exceeded = Self::check_memory_exceeded(exit_code, &all_stderr);

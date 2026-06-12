@@ -32,6 +32,22 @@ pub struct ServerConfig {
     pub log_level: String,
     #[serde(default)]
     pub cors: CorsConfig,
+    #[serde(default)]
+    pub rate_limit: RateLimitConfig,
+}
+
+/// Rate limiting configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct RateLimitConfig {
+    /// Whether rate limiting is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum requests per second (global, approximate)
+    #[serde(default = "default_rate_limit_rps")]
+    pub requests_per_second: u64,
+    /// Maximum burst size
+    #[serde(default = "default_rate_limit_burst")]
+    pub burst_size: u64,
 }
 
 /// CORS configuration
@@ -189,6 +205,18 @@ fn default_cleanup_interval() -> u32 { 24 }
 fn default_cors_max_age() -> u64 { 3600 }
 fn default_true() -> bool { true }
 fn default_tick_interval() -> u64 { 10 }
+fn default_rate_limit_rps() -> u64 { 100 }
+fn default_rate_limit_burst() -> u64 { 200 }
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            requests_per_second: default_rate_limit_rps(),
+            burst_size: default_rate_limit_burst(),
+        }
+    }
+}
 
 impl Default for CorsConfig {
     fn default() -> Self {

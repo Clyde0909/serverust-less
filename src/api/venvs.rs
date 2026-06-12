@@ -222,6 +222,11 @@ pub async fn toggle_job_venv(
         priority: None,
         max_retries: None,
         enabled: None,
+        change_summary: Some(if new_value {
+            "Switched job to custom virtual environment".to_string()
+        } else {
+            "Switched job back to main virtual environment".to_string()
+        }),
     };
     let updated_job = state.job_service.update_job(&job_id, update).await?;
 

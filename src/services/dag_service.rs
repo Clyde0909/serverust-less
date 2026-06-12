@@ -38,9 +38,9 @@ impl DagService {
         }
 
         let on_failure = match req.on_failure.as_str() {
-            "stop" | "continue" | "retry" => req.on_failure.clone(),
+            "stop" | "continue" => req.on_failure.clone(),
             _ => return Err(AppError::Validation(
-                "on_failure must be one of: stop, continue, retry".to_string(),
+                "on_failure must be one of: stop, continue".to_string(),
             )),
         };
 
@@ -90,9 +90,9 @@ impl DagService {
 
         if let Some(on_failure) = &req.on_failure {
             match on_failure.as_str() {
-                "stop" | "continue" | "retry" => dag.on_failure = on_failure.clone(),
+                "stop" | "continue" => dag.on_failure = on_failure.clone(),
                 _ => return Err(AppError::Validation(
-                    "on_failure must be one of: stop, continue, retry".to_string(),
+                    "on_failure must be one of: stop, continue".to_string(),
                 )),
             }
         }

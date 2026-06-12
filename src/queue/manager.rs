@@ -69,19 +69,24 @@ impl QueueManager {
     /// Reconstruct a QueueItem from a QueueEntry by fetching execution + job from DB
     async fn reconstruct_item(&self, entry: &QueueEntry) -> Option<QueueItem> {
         match self.execution_repo.get_by_id(&entry.execution_id).await {
-            Ok(exec) => match self.job_repo.get_by_id(&exec.job_id).await {
-                Ok(job) => Some(QueueItem::new(
+            Ok(exec) => match self.job_repo.get_version(&exec.job_id, exec.job_version).await {
+                Ok(job_version) => Some(QueueItem::new(
                     &exec.id,
-                    &job.id,
+                    &exec.job_id,
                     entry.priority,
-                    &job.python_code,
-                    job.timeout_seconds,
-                    job.memory_limit_mb,
+                    &job_version.python_code,
+                    job_version.timeout_seconds,
+                    job_version.memory_limit_mb,
                     exec.input_data.clone(),
-                    job.use_custom_venv,
+                    job_version.use_custom_venv,
                 )),
                 Err(e) => {
-                    warn!("Failed to get job {} for queue reconstruction: {}", exec.job_id, e);
+                    warn!(
+                        "Failed to get job version {} for job {} during queue reconstruction: {}",
+                        exec.job_version,
+                        exec.job_id,
+                        e
+                    );
                     None
                 }
             },
@@ -223,6 +228,7 @@ impl QueueManager {
                 // Schedule re-queue after delay
                 let repo = self.repo.clone();
                 let entry_id = entry.id.clone();
+                let retry_priority = entry.priority;
                 let memory_queue = self.memory_queue.clone();
                 let max_mem = self.max_memory_size;
                 let exec_repo = self.execution_repo.clone();
@@ -241,16 +247,16 @@ impl QueueManager {
 
                     // Try to reconstruct and add to in-memory queue
                     let item = match exec_repo.get_by_id(&exec_id).await {
-                        Ok(exec) => match job_repo.get_by_id(&exec.job_id).await {
-                            Ok(job) => Some(QueueItem::new(
+                        Ok(exec) => match job_repo.get_version(&exec.job_id, exec.job_version).await {
+                            Ok(job_version) => Some(QueueItem::new(
                                 &exec.id,
-                                &job.id,
-                                job.priority,
-                                &job.python_code,
-                                job.timeout_seconds,
-                                job.memory_limit_mb,
+                                &exec.job_id,
+                                retry_priority,
+                                &job_version.python_code,
+                                job_version.timeout_seconds,
+                                job_version.memory_limit_mb,
                                 exec.input_data.clone(),
-                                job.use_custom_venv,
+                                job_version.use_custom_venv,
                             )),
                             Err(_) => None,
                         },

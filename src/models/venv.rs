@@ -213,7 +213,7 @@ impl Venv {
     }
 
     /// Create a new standalone named venv (not tied to a job)
-    pub fn new_standalone(name: &str, path: &str, python_version: Option<String>) -> Self {
+    pub fn new_standalone(_name: &str, path: &str, python_version: Option<String>) -> Self {
         let now = Utc::now().to_rfc3339();
         Self {
             id: Uuid::new_v4().to_string(),

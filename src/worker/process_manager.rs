@@ -1,11 +1,9 @@
 //! Process manager - tracks and manages child processes for cancellation
 
 use std::collections::HashMap;
-use std::process::ExitStatus;
 use std::sync::Arc;
-use tokio::process::Child;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Handle to a running process
 pub struct ProcessHandle {

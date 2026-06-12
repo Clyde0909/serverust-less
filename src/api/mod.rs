@@ -11,12 +11,14 @@ pub mod venvs;
 
 use axum::Router;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use crate::config::CorsConfig;
+use crate::config::RateLimitConfig;
 use crate::dag::DagEngine;
 use crate::queue::QueueManager;
 use crate::services::{
@@ -46,6 +48,12 @@ pub struct AppState {
     pub venv_manager: Arc<VenvManager>,
     /// DAG engine — used by DAG trigger/callback endpoints.
     pub dag_engine: Option<Arc<DagEngine>>,
+    /// CORS configuration from config file.
+    pub cors_config: CorsConfig,
+    /// Rate limiting configuration from config file.
+    pub rate_limit_config: RateLimitConfig,
+    /// Whether the background cron scheduler is enabled.
+    pub scheduler_enabled: bool,
 }
 
 /// OpenAPI documentation
@@ -63,6 +71,9 @@ pub struct AppState {
         jobs::bulk_create_jobs,
         jobs::bulk_delete_jobs,
         jobs::clone_job,
+        jobs::list_job_versions,
+        jobs::get_job_version,
+        jobs::restore_job_version,
         // Executions
         executions::list_executions,
         executions::get_execution,
@@ -89,6 +100,7 @@ pub struct AppState {
         packages::get_dependency_status,
         packages::install_job_dependencies,
         packages::search_pypi,
+        packages::get_pypi_package_details,
         // Venvs
         venvs::list_venvs,
         venvs::create_venv,
@@ -136,6 +148,9 @@ pub struct AppState {
             crate::models::BulkDeleteRequest,
             crate::models::BulkOperationResponse,
             crate::models::CloneJobRequest,
+            crate::models::JobVersion,
+            crate::models::JobVersionListResponse,
+            crate::models::RestoreJobVersionRequest,
             // Execution schemas
             crate::models::Execution,
             crate::models::ExecuteJobRequest,
@@ -162,11 +177,15 @@ pub struct AppState {
             crate::models::PriorityCount,
             // Health schemas
             health::HealthResponse,
+            health::HealthChecksResponse,
+            health::HealthSubsystemResponse,
             health::StatsResponse,
             health::WorkerStatusResponse,
             // Package search schemas
             packages::SearchResponse,
             packages::PyPiSearchResult,
+            packages::PyPiPackageDetailResponse,
+            packages::PyPiReleaseSummary,
             // Error schemas
             crate::error::ErrorResponse,
             // Schedule schemas
@@ -210,11 +229,44 @@ pub struct ApiDoc;
 
 /// Create the API router
 pub fn create_router(state: AppState) -> Router {
-    // CORS configuration
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // Build CORS layer from configuration
+    let cors_config = state.cors_config.clone();
+    let cors = if cors_config.enabled {
+        let origins: Vec<tower_http::cors::HeaderValue> = cors_config
+            .allowed_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+        let methods: Vec<http::Method> = cors_config
+            .allowed_methods
+            .iter()
+            .filter_map(|m| m.parse().ok())
+            .collect();
+
+        let origin_layer = if origins.is_empty() {
+            AllowOrigin::any()
+        } else {
+            AllowOrigin::list(origins)
+        };
+
+        let method_layer = if methods.is_empty() {
+            tower_http::cors::Any::default()
+        } else {
+            tower_http::cors::AllowMethods::list(methods)
+        };
+
+        CorsLayer::new()
+            .allow_origin(origin_layer)
+            .allow_methods(method_layer)
+            .allow_headers(tower_http::cors::Any)
+            .max_age(std::time::Duration::from_secs(cors_config.max_age_seconds))
+    } else {
+        // CORS disabled — use permissive defaults for development
+        CorsLayer::permissive()
+    };
+
+    // Clone rate_limit_config before state is moved into Arc
+    let rate_limit_config = state.rate_limit_config.clone();
 
     let api_routes = Router::new()
         .merge(jobs::router())
@@ -231,7 +283,7 @@ pub fn create_router(state: AppState) -> Router {
     let static_files = ServeDir::new("web")
         .not_found_service(ServeFile::new("web/index.html"));
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api/v1", api_routes)
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .route("/api/openapi.json", axum::routing::get(|| async {
@@ -241,5 +293,13 @@ pub fn create_router(state: AppState) -> Router {
         .nest_service("/js", ServeDir::new("web/js"))
         .fallback_service(static_files)
         .layer(cors)
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+
+    // Apply rate limiting if enabled
+    if rate_limit_config.enabled {
+        let max_concurrent = rate_limit_config.burst_size.max(1) as usize;
+        router = router.layer(tower::limit::ConcurrencyLimitLayer::new(max_concurrent));
+    }
+
+    router
 }

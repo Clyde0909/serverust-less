@@ -79,6 +79,7 @@ async fn setup_context() -> TestContext {
         worker_pool_size: 2,
         venv_manager,
         dag_engine: None,
+        cors_config: Default::default(),
     };
 
     TestContext {
@@ -276,7 +277,8 @@ async fn test_execution_routes_cover_all_endpoints() {
     let logs_response = send_empty(&ctx.app, Method::GET, &format!("/api/v1/executions/{execution_id}/logs?log_type=stdout")).await;
     assert_eq!(logs_response.status(), StatusCode::OK);
 
-    let mut completed_execution = Execution::new(job_id, None);
+    // Use version 1 for the completed execution snapshot (default initial version)
+    let mut completed_execution = Execution::new(job_id, None, 1);
     completed_execution.mark_running("worker-1");
     completed_execution.mark_success("done".to_string());
     let completed_execution = ctx.execution_repo.create(&completed_execution).await.unwrap();

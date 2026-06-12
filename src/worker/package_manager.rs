@@ -26,6 +26,87 @@ pub struct PackageManager {
     use_cache: bool,
     /// Cache directory
     cache_dir: Option<String>,
+    /// Optional custom package index URL for pip installs.
+    index_url: Option<String>,
+    /// Trusted hosts to pass through to pip when using custom indexes.
+    trusted_hosts: Vec<String>,
+}
+
+/// Builder for fluent package installation allowing optional version, extras, and custom venv.
+#[derive(Debug, Clone)]
+pub struct InstallBuilder {
+    /// Package name (required)
+    name: String,
+    /// Optional version constraint (e.g., "==1.2.3" or ">=1.0,<2.0")
+    version: Option<String>,
+    /// Optional extras (e.g., "[extra1,extra2]") – currently not used in installation logic.
+    extras: Vec<String>,
+    /// Optional target venv path. If None, installs to the main venv.
+    target_venv: Option<std::path::PathBuf>,
+}
+
+impl InstallBuilder {
+    /// Start a new builder with the package name.
+    pub fn new<N: Into<String>>(name: N) -> Self {
+        Self {
+            name: name.into(),
+            version: None,
+            extras: Vec::new(),
+            target_venv: None,
+        }
+    }
+
+    /// Set a version constraint.
+    pub fn version<V: Into<String>>(mut self, version: V) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Add extras (comma‑separated or individual strings).
+    pub fn extras<I, S>(mut self, extras: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extras = extras.into_iter().map(|s| s.into()).collect();
+        self
+    }
+
+    /// Target a specific virtual environment path.
+    pub fn target_venv<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.target_venv = Some(path.into());
+        self
+    }
+
+    /// Build the full package specification string, including extras and version constraint.
+    pub fn build_spec(&self) -> String {
+        let mut spec = self.name.clone();
+        if !self.extras.is_empty() {
+            let extras_joined = self.extras.join(",");
+            spec = format!("{}[{}]", spec, extras_joined);
+        }
+        if let Some(ref ver) = self.version {
+            // If version already contains an operator, keep it; otherwise prepend "=="
+            let has_operator = ver.starts_with("==")
+                || ver.starts_with(">=")
+                || ver.starts_with("<=")
+                || ver.starts_with('>')
+                || ver.starts_with('<')
+                || ver.starts_with("~=")
+                || ver.starts_with("!=");
+            if has_operator {
+                spec.push_str(ver);
+            } else {
+                spec.push_str(&format!("=={}", ver));
+            }
+        }
+        spec
+    }
+
+    /// Retrieve the optional version constraint (raw) for callers that need it.
+    pub fn version_constraint(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
 }
 
 impl PackageManager {
@@ -36,6 +117,26 @@ impl PackageManager {
             pip_timeout,
             use_cache,
             cache_dir,
+            index_url: None,
+            trusted_hosts: Vec::new(),
+        }
+    }
+
+    /// Create a PackageManager with explicit index configuration.
+    pub fn with_index_config(
+        pip_timeout: u64,
+        use_cache: bool,
+        cache_dir: Option<String>,
+        index_url: Option<String>,
+        trusted_hosts: Vec<String>,
+    ) -> Self {
+        Self {
+            main_venv_lock: Arc::new(Mutex::new(())),
+            pip_timeout,
+            use_cache,
+            cache_dir,
+            index_url,
+            trusted_hosts,
         }
     }
 
@@ -90,20 +191,7 @@ impl PackageManager {
 
         info!("Installing package: {}", package_spec);
 
-        let mut args = vec![
-            "install".to_string(),
-            package_spec.clone(),
-            "--no-input".to_string(),
-        ];
-
-        // Add cache directory if configured
-        if self.use_cache {
-            if let Some(ref cache_dir) = self.cache_dir {
-                args.push(format!("--cache-dir={}", cache_dir));
-            }
-        } else {
-            args.push("--no-cache-dir".to_string());
-        }
+        let args = self.build_install_args(&package_spec);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(self.pip_timeout),
@@ -289,6 +377,40 @@ impl PackageManager {
             venv_path.join("bin").join("pip")
         }
     }
+
+    fn build_install_args(&self, package_spec: &str) -> Vec<String> {
+        let mut args = vec![
+            "install".to_string(),
+            package_spec.to_string(),
+            "--no-input".to_string(),
+            "--disable-pip-version-check".to_string(),
+        ];
+
+        if self.use_cache {
+            if let Some(ref cache_dir) = self.cache_dir {
+                args.push(format!("--cache-dir={}", cache_dir));
+            }
+        } else {
+            args.push("--no-cache-dir".to_string());
+        }
+
+        if let Some(ref index_url) = self.index_url {
+            if !index_url.trim().is_empty() {
+                args.push("--index-url".to_string());
+                args.push(index_url.clone());
+            }
+        }
+
+        for trusted_host in &self.trusted_hosts {
+            let host = trusted_host.trim();
+            if !host.is_empty() {
+                args.push("--trusted-host".to_string());
+                args.push(host.to_string());
+            }
+        }
+
+        args
+    }
 }
 
 impl Default for PackageManager {
@@ -355,5 +477,36 @@ mod tests {
         } else {
             assert_eq!(pip_path, std::path::PathBuf::from("/tmp/venv/bin/pip"));
         }
+    }
+
+    #[test]
+    fn test_build_install_args_with_index_configuration() {
+        let manager = PackageManager::with_index_config(
+            120,
+            true,
+            Some("/tmp/cache".to_string()),
+            Some("https://pypi.example.com/simple".to_string()),
+            vec!["pypi.example.com".to_string(), "files.example.com".to_string()],
+        );
+
+        let args = manager.build_install_args("requests==2.31.0");
+
+        assert!(args.contains(&"install".to_string()));
+        assert!(args.contains(&"requests==2.31.0".to_string()));
+        assert!(args.contains(&"--index-url".to_string()));
+        assert!(args.contains(&"https://pypi.example.com/simple".to_string()));
+        assert!(args.contains(&"--trusted-host".to_string()));
+        assert!(args.contains(&"pypi.example.com".to_string()));
+        assert!(args.contains(&"files.example.com".to_string()));
+        assert!(args.iter().any(|arg| arg == "--cache-dir=/tmp/cache"));
+    }
+
+    #[test]
+    fn test_build_install_args_without_cache() {
+        let manager = PackageManager::new(60, false, None);
+        let args = manager.build_install_args("numpy");
+
+        assert!(args.contains(&"--no-cache-dir".to_string()));
+        assert!(!args.contains(&"--index-url".to_string()));
     }
 }

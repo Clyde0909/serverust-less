@@ -30,6 +30,8 @@ pub struct Job {
     pub priority: i32,
     /// Maximum retry attempts
     pub max_retries: i32,
+    /// Current immutable version number for this job definition
+    pub current_version: i32,
     /// Creation timestamp
     pub created_at: String,
     /// Last update timestamp
@@ -103,6 +105,65 @@ pub struct UpdateJobRequest {
     pub max_retries: Option<i32>,
     /// Whether the job is enabled
     pub enabled: Option<bool>,
+    /// Optional human-readable summary for the new version snapshot
+    #[validate(length(max = 500, message = "Change summary must be at most 500 characters"))]
+    pub change_summary: Option<String>,
+}
+
+/// Immutable snapshot of a job definition at a specific version.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, ToSchema)]
+pub struct JobVersion {
+    /// Unique identifier for the version snapshot
+    pub id: String,
+    /// Job ID this snapshot belongs to
+    pub job_id: String,
+    /// Monotonic version number for the job
+    pub version_number: i32,
+    /// Job name at this version
+    pub name: String,
+    /// Job description at this version
+    pub description: Option<String>,
+    /// Python code at this version
+    pub python_code: String,
+    /// Execution timeout in seconds at this version
+    pub timeout_seconds: i32,
+    /// Memory limit in MB at this version
+    pub memory_limit_mb: i32,
+    /// Whether this version used a custom virtual environment
+    pub use_custom_venv: bool,
+    /// Selected venv ID at this version
+    pub venv_id: Option<String>,
+    /// Queue priority at this version
+    pub priority: i32,
+    /// Maximum retries at this version
+    pub max_retries: i32,
+    /// Enabled state captured in this snapshot
+    pub enabled: bool,
+    /// When the version snapshot was created
+    pub created_at: String,
+    /// Optional summary describing why this version exists
+    pub change_summary: Option<String>,
+    /// Origin of this snapshot: create, update, restore, clone, etc.
+    pub source: String,
+}
+
+/// Response payload for listing all versions of a job.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct JobVersionListResponse {
+    /// Job ID these versions belong to
+    pub job_id: String,
+    /// Current version number of the job
+    pub current_version: i32,
+    /// All known immutable versions, newest first
+    pub versions: Vec<JobVersion>,
+}
+
+/// Request body for restoring an older job version.
+#[derive(Debug, Clone, Deserialize, ToSchema, Validate)]
+pub struct RestoreJobVersionRequest {
+    /// Optional summary for the restore operation
+    #[validate(length(max = 500, message = "Change summary must be at most 500 characters"))]
+    pub change_summary: Option<String>,
 }
 
 /// Request body for bulk delete operations
@@ -179,6 +240,7 @@ impl Job {
             venv_id: req.venv_id.clone(),
             priority: req.priority,
             max_retries: req.max_retries,
+            current_version: 1,
             created_at: now.clone(),
             updated_at: now,
             enabled: false,
@@ -221,6 +283,30 @@ impl Job {
             self.enabled = enabled;
         }
         self.updated_at = Utc::now().to_rfc3339();
+    }
+}
+
+impl JobVersion {
+    /// Create an immutable snapshot from the current job state.
+    pub fn from_job(job: &Job, change_summary: Option<String>, source: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            job_id: job.id.clone(),
+            version_number: job.current_version,
+            name: job.name.clone(),
+            description: job.description.clone(),
+            python_code: job.python_code.clone(),
+            timeout_seconds: job.timeout_seconds,
+            memory_limit_mb: job.memory_limit_mb,
+            use_custom_venv: job.use_custom_venv,
+            venv_id: job.venv_id.clone(),
+            priority: job.priority,
+            max_retries: job.max_retries,
+            enabled: job.enabled,
+            created_at: Utc::now().to_rfc3339(),
+            change_summary,
+            source: source.to_string(),
+        }
     }
 }
 

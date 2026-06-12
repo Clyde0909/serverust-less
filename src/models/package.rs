@@ -108,6 +108,21 @@ pub struct InstallPackageRequest {
     pub version: Option<String>,
 }
 
+/// Request for fluent package installation with optional target venv.
+#[derive(Debug, Clone, Deserialize, ToSchema, Validate)]
+pub struct FluentInstallRequest {
+    /// Package name (required, same validation as InstallPackageRequest)
+    #[validate(length(min = 1, max = 100, message = "Package name must be 1-100 characters"))]
+    #[validate(custom(function = "validate_package_name"))]
+    pub name: String,
+    /// Optional version constraint (same validation as InstallPackageRequest)
+    #[validate(length(max = 50, message = "Version must be at most 50 characters"))]
+    pub version: Option<String>,
+    /// Optional target virtual environment path for custom installation.
+    #[validate(length(max = 200, message = "Venv path must be at most 200 characters"))]
+    pub venv_path: Option<String>,
+}
+
 /// Validate Python package name format
 fn validate_package_name(name: &str) -> Result<(), validator::ValidationError> {
     // Package names must start with a letter or digit, and contain only letters, digits, underscores, hyphens, and dots

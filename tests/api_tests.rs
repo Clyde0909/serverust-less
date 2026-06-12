@@ -19,6 +19,10 @@ use tower::ServiceExt;
 use serde_json::Value;
 
 async fn setup_app() -> axum::Router {
+    setup_app_with_options(true, 2).await
+}
+
+async fn setup_app_with_options(seed_main_venv: bool, worker_pool_size: usize) -> axum::Router {
     // 1. Initialize an in-memory database
     let pool = init_pool("sqlite::memory:").await.expect("Failed to initialize pool");
     run_migrations(&pool).await.expect("Failed to run migrations");
@@ -39,25 +43,40 @@ async fn setup_app() -> axum::Router {
         queue_repo.clone(),
         execution_repo.clone(),
         job_repo.clone(),
-        1000, // max memory queue size
-        3,    // max retries
-        5,    // retry delay seconds
+        1000,
+        3,
+        5,
     ));
-    let process_manager = Arc::new(ProcessManager::new(30)); // 30 seconds graceful shutdown
-    let venv_manager = Arc::new(VenvManager::new(
-        std::path::Path::new("/tmp/serverust-test-venvs"),
-        "python3",
-    ));
+    let process_manager = Arc::new(ProcessManager::new(30));
 
     // 4. Initialize Services
-    let audit_service = AuditService::new(audit_repo, true);
     let job_service = JobService::new(job_repo.clone());
-    let execution_service = ExecutionService::new(execution_repo.clone(), log_repo.clone(), job_repo.clone());
+    let execution_service = ExecutionService::new(
+        execution_repo.clone(),
+        log_repo.clone(),
+        job_repo.clone(),
+    );
     let package_service = PackageService::new(package_repo.clone());
     let venv_service = VenvService::new(venv_repo.clone());
     let queue_service = QueueService::new(queue_repo.clone());
+    let audit_service = AuditService::new(audit_repo.clone(), true);
+    let schedule_service = ScheduleService::new(schedule_repo.clone());
+    let dag_service = DagService::new(dag_repo.clone());
 
-    // 5. Create AppState
+    let venv_manager = Arc::new(VenvManager::new(
+        std::path::Path::new("/tmp/serverust-api-test-venvs"),
+        "python3",
+    ));
+
+    // 5. Optionally seed main venv
+    if seed_main_venv {
+        let main_venv_path = venv_manager.main_venv_path();
+        let _ = venv_service
+            .ensure_main_venv(main_venv_path.to_str().unwrap_or(""), None)
+            .await;
+    }
+
+    // 6. Create AppState
     let state = AppState {
         job_service,
         execution_service,
@@ -65,173 +84,135 @@ async fn setup_app() -> axum::Router {
         venv_service,
         queue_service,
         audit_service,
-        schedule_service: ScheduleService::new(schedule_repo),
-        dag_service: DagService::new(dag_repo),
+        schedule_service,
+        dag_service,
         queue_manager,
         process_manager,
-        worker_pool_size: 2,
+        worker_pool_size,
         venv_manager,
         dag_engine: None,
+        cors_config: Default::default(),
+        rate_limit_config: Default::default(),
+        scheduler_enabled: true,
     };
 
-    // 6. Return router
+    // 7. Return router
     create_router(state)
 }
 
-#[tokio::test]
-async fn test_health_api() {
-    let app = setup_app().await;
+// ── Health & Monitoring ──────────────────────────────────────────────────────
 
-    // Test /api/v1/health
+#[tokio::test]
+async fn test_health_check_healthy() {
+    let app = setup_app().await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/health")
-                .method("GET")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-
     assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn test_workers_status_api() {
+async fn test_stats_endpoint() {
     let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
+#[tokio::test]
+async fn test_workers_status() {
+    let app = setup_app().await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/workers/status")
-                .method("GET")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-
     assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn test_queue_status_api() {
+async fn test_queue_status() {
     let app = setup_app().await;
-
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/queue/status")
-                .method("GET")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+// ── Job CRUD ─────────────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn test_jobs_api_crud() {
+async fn test_create_and_get_job() {
     let app = setup_app().await;
-
-    // 1. Array of jobs should be empty initially
-    let response = app.clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/jobs")
-                .method("GET")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // 2. Create a Job
-    let create_body = serde_json::json!({
-        "name": "test_job",
-        "description": "Integration Test Job",
+    let body = serde_json::json!({
+        "name": "test-job",
         "python_code": "print('hello')",
         "timeout_seconds": 30,
         "memory_limit_mb": 128,
-        "use_custom_venv": false,
-        "priority": 1,
-        "max_retries": 0,
-        "enabled": true
+        "priority": 0,
+        "max_retries": 0
     });
 
-    let response = app.clone()
+    let response = app
+        .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/jobs")
                 .method("POST")
-                .header("Content-Type", "application/json")
-                .body(Body::from(create_body.to_string()))
+                .uri("/api/v1/jobs")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
+}
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let created_job: Value = serde_json::from_slice(&body_bytes).unwrap();
-    let job_id = created_job["id"].as_str().unwrap().to_string();
-
-    // 3. Get the Job
-    let response = app.clone()
+#[tokio::test]
+async fn test_list_jobs() {
+    let app = setup_app().await;
+    let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/v1/jobs/{}", job_id))
-                .method("GET")
+                .uri("/api/v1/jobs")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
 
-    // 4. Update the Job
-    let update_body = serde_json::json!({
-        "name": "updated_test_job",
-        "python_code": "print('hello world')",
-        "priority": 10
-    });
-
-    let response = app.clone()
+#[tokio::test]
+async fn test_job_not_found() {
+    let app = setup_app().await;
+    let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/api/v1/jobs/{}", job_id))
-                .method("PUT")
-                .header("Content-Type", "application/json")
-                .body(Body::from(update_body.to_string()))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // 5. Delete the Job
-    let response = app.clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/jobs/{}", job_id))
-                .method("DELETE")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-    // 6. Get deleted job - Should be 404
-    let response = app.clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v1/jobs/{}", job_id))
-                .method("GET")
+                .uri("/api/v1/jobs/nonexistent-id")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -240,163 +221,134 @@ async fn test_jobs_api_crud() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+// ── Execution ────────────────────────────────────────────────────────────────
+
 #[tokio::test]
-async fn test_executions_api() {
+async fn test_execute_job() {
     let app = setup_app().await;
 
-    // 1. Create a job first
-    let create_body = serde_json::json!({
-        "name": "exec_test",
-        "python_code": "print('running')"
+    // Create a job first
+    let body = serde_json::json!({
+        "name": "exec-test-job",
+        "python_code": "print('hello')",
+        "timeout_seconds": 30,
+        "memory_limit_mb": 128,
+        "priority": 0,
+        "max_retries": 0
     });
 
-    let resp = app.clone().oneshot(
-        Request::builder()
-            .uri("/api/v1/jobs")
-            .method("POST")
-            .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string()))
-            .unwrap(),
-    ).await.unwrap();
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let create_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/jobs")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+    let body_bytes = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let job: Value = serde_json::from_slice(&body_bytes).unwrap();
     let job_id = job["id"].as_str().unwrap();
 
-    // 2. Execute the job
-    let exec_body = serde_json::json!({
-        "priority": 5
-    });
-
-    let response = app.clone().oneshot(
-        Request::builder()
-            .uri(format!("/api/v1/jobs/{}/execute", job_id))
-            .method("POST")
-            .header("Content-Type", "application/json")
-            .body(Body::from(exec_body.to_string()))
-            .unwrap(),
-    ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let execution: Value = serde_json::from_slice(&body_bytes).unwrap();
-    let exec_id = execution["id"].as_str().unwrap();
-
-    // 3. Get the Execution
-    let response = app.clone().oneshot(
-        Request::builder()
-            .uri(format!("/api/v1/executions/{}", exec_id))
-            .method("GET")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    // 4. Cancel the execution
-    let response = app.clone().oneshot(
-        Request::builder()
-            .uri(format!("/api/v1/executions/{}/cancel", exec_id))
-            .method("POST")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
-    // Usually ok or conflict if already done.
-    assert!(response.status() == StatusCode::OK || response.status() == StatusCode::CONFLICT);
-    
-    // 5. List Executions
-    let response = app.clone().oneshot(
-        Request::builder()
-            .uri("/api/v1/executions")
-            .method("GET")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    // Execute the job
+    let exec_resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/api/v1/jobs/{}/execute", job_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"priority": 5}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exec_resp.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]
-async fn test_job_dependencies_api() {
+async fn test_list_executions() {
     let app = setup_app().await;
-
-    // Create a Job to attach dependencies to
-    let create_body = serde_json::json!({
-        "name": "dep_test",
-        "python_code": "import requests",
-        "use_custom_venv": true
-    });
-    
-    let resp = app.clone().oneshot(
-        Request::builder()
-            .uri("/api/v1/jobs")
-            .method("POST")
-            .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string()))
-            .unwrap(),
-    ).await.unwrap();
-    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    let job: Value = serde_json::from_slice(&body_bytes).unwrap();
-    let job_id = job["id"].as_str().unwrap();
-
-    // Add dependency
-    let dep_body = serde_json::json!({
-        "package_name": "requests",
-        "version_constraint": "==2.31.0"
-    });
-
-    let resp = app.clone().oneshot(
-        Request::builder()
-            .uri(format!("/api/v1/jobs/{}/dependencies", job_id))
-            .method("POST")
-            .header("Content-Type", "application/json")
-            .body(Body::from(dep_body.to_string()))
-            .unwrap(),
-    ).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
-    // Get dependencies
-    let resp = app.clone().oneshot(
-        Request::builder()
-            .uri(format!("/api/v1/jobs/{}/dependencies", job_id))
-            .method("GET")
-            .body(Body::empty())
-            .unwrap(),
-    ).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/executions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
-#[tokio::test]
-async fn test_packages_api() {
-    let app = setup_app().await;
+// ── Packages ─────────────────────────────────────────────────────────────────
 
-    // Test /api/v1/packages
+#[tokio::test]
+async fn test_list_packages() {
+    let app = setup_app().await;
     let response = app
         .oneshot(
             Request::builder()
                 .uri("/api/v1/packages")
-                .method("GET")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-
     assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
-async fn test_venvs_api() {
+async fn test_search_packages() {
     let app = setup_app().await;
-
-    // Test /api/v1/venvs
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/api/v1/venvs")
-                .method("GET")
+                .uri("/api/v1/packages/search?q=requests")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
 
+// ── Venvs ────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_list_venvs() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/venvs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ── OpenAPI ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_openapi_json() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }

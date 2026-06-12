@@ -10,7 +10,6 @@ use futures::stream::Stream;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_stream::StreamExt;
 
 use crate::api::AppState;
 use crate::error::AppError;
@@ -199,16 +198,19 @@ pub async fn retry_execution(
     let execution = state.execution_service.retry_execution(&id).await?;
 
     // Enqueue the newly created retry execution
-    let job = state.job_service.get_job(&execution.job_id).await?;
+    let job_version = state
+        .job_service
+        .get_job_version(&execution.job_id, execution.job_version)
+        .await?;
     let item = QueueItem::new(
         &execution.id,
-        &job.id,
-        job.priority, // use original job priority
-        &job.python_code,
-        job.timeout_seconds,
-        job.memory_limit_mb,
+        &execution.job_id,
+        job_version.priority,
+        &job_version.python_code,
+        job_version.timeout_seconds,
+        job_version.memory_limit_mb,
         execution.input_data.clone(),
-        job.use_custom_venv,
+        job_version.use_custom_venv,
     );
     state
         .queue_manager
@@ -330,7 +332,6 @@ fn create_log_stream(
     initial_execution: Execution,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     let mut last_log_count = 0i64;
-    let mut execution_complete = initial_execution.completed_at.is_some();
 
     async_stream::stream! {
         // Send initial status
@@ -342,6 +343,11 @@ fn create_log_stream(
                 "started_at": initial_execution.started_at,
             }).to_string());
         yield Ok(status_event);
+
+        if initial_execution.completed_at.is_some() {
+            yield Ok(build_completion_event(&execution_id, &initial_execution));
+            return;
+        }
 
         loop {
             // Fetch new logs
@@ -379,33 +385,35 @@ fn create_log_stream(
             }
 
             // Check if execution is complete
-            if !execution_complete {
-                if let Ok(exec) = state.execution_service.get_execution(&execution_id).await {
-                    if exec.completed_at.is_some() {
-                        execution_complete = true;
-
-                        // Send completion event
-                        let complete_event = Event::default()
-                            .event("complete")
-                            .data(serde_json::json!({
-                                "execution_id": execution_id,
-                                "status": exec.status,
-                                "duration_ms": exec.duration_ms,
-                                "output_data": exec.output_data,
-                                "error_message": exec.error_message,
-                            }).to_string());
-                        yield Ok(complete_event);
-
-                        // End the stream
-                        break;
-                    }
+            match state.execution_service.get_execution(&execution_id).await {
+                Ok(exec) if exec.completed_at.is_some() => {
+                    yield Ok(build_completion_event(&execution_id, &exec));
+                    break;
                 }
-            } else {
-                break;
+                Ok(_) => {}
+                Err(e) => {
+                    let error_event = Event::default()
+                        .event("error")
+                        .data(format!("Failed to fetch execution status: {}", e));
+                    yield Ok(error_event);
+                    break;
+                }
             }
 
             // Wait before polling again
             tokio::time::sleep(Duration::from_millis(2000)).await;
         }
     }
+}
+
+fn build_completion_event(execution_id: &str, execution: &Execution) -> Event {
+    Event::default()
+        .event("complete")
+        .data(serde_json::json!({
+            "execution_id": execution_id,
+            "status": execution.status,
+            "duration_ms": execution.duration_ms,
+            "output_data": execution.output_data,
+            "error_message": execution.error_message,
+        }).to_string())
 }

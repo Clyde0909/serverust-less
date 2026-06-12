@@ -3,8 +3,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::models::{Execution, QueueItem};
+use crate::models::QueueItem;
 use crate::worker::python_runner::{ExecutionResult, PythonRunner};
+
+#[cfg(test)]
+use crate::models::Execution;
 
 /// Job executor handles the execution of a single job
 pub struct JobExecutor {
@@ -151,7 +154,7 @@ mod tests {
             PathBuf::from("/venvs"),
         );
 
-        let execution = Execution::new("job-123", None);
+        let execution = Execution::new("job-123", None, 1);
         let result = ExecutionResult {
             success: true,
             stdout: "Hello, World!".to_string(),
@@ -176,7 +179,7 @@ mod tests {
             PathBuf::from("/venvs"),
         );
 
-        let execution = Execution::new("job-123", None);
+        let execution = Execution::new("job-123", None, 1);
         let result = ExecutionResult {
             success: false,
             stdout: String::new(),
@@ -200,7 +203,7 @@ mod tests {
             PathBuf::from("/venvs"),
         );
 
-        let execution = Execution::new("job-123", None);
+        let execution = Execution::new("job-123", None, 1);
         let result = ExecutionResult {
             success: false,
             stdout: String::new(),
@@ -225,7 +228,7 @@ mod tests {
             PathBuf::from("/venvs"),
         );
 
-        let execution = Execution::new("job-123", None);
+        let execution = Execution::new("job-123", None, 1);
         let result = ExecutionResult {
             success: false,
             stdout: String::new(),
