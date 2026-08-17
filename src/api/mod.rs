@@ -232,12 +232,12 @@ pub fn create_router(state: AppState) -> Router {
     // Build CORS layer from configuration
     let cors_config = state.cors_config.clone();
     let cors = if cors_config.enabled {
-        let origins: Vec<tower_http::cors::HeaderValue> = cors_config
+        let origins: Vec<axum::http::HeaderValue> = cors_config
             .allowed_origins
             .iter()
             .filter_map(|o| o.parse().ok())
             .collect();
-        let methods: Vec<http::Method> = cors_config
+        let methods: Vec<axum::http::Method> = cors_config
             .allowed_methods
             .iter()
             .filter_map(|m| m.parse().ok())
@@ -250,7 +250,7 @@ pub fn create_router(state: AppState) -> Router {
         };
 
         let method_layer = if methods.is_empty() {
-            tower_http::cors::Any::default()
+            tower_http::cors::AllowMethods::any()
         } else {
             tower_http::cors::AllowMethods::list(methods)
         };

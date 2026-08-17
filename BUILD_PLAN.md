@@ -83,7 +83,8 @@ CREATE TABLE jobs (
     max_retries INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    enabled BOOLEAN DEFAULT 1
+    enabled BOOLEAN DEFAULT 1,
+    current_version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE INDEX idx_jobs_enabled ON jobs(enabled);
@@ -105,6 +106,7 @@ CREATE TABLE executions (
     started_at DATETIME,
     completed_at DATETIME,
     duration_ms INTEGER,
+    job_version INTEGER NOT NULL DEFAULT 1,
     FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
 );
 
@@ -126,6 +128,36 @@ CREATE TABLE execution_logs (
 
 CREATE INDEX idx_execution_logs_execution_id ON execution_logs(execution_id);
 ```
+
+### Table: job_versions
+```sql
+CREATE TABLE job_versions (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    python_code TEXT NOT NULL,
+    timeout_seconds INTEGER NOT NULL,
+    memory_limit_mb INTEGER NOT NULL,
+    use_custom_venv BOOLEAN NOT NULL DEFAULT 0,
+    venv_id TEXT,
+    priority INTEGER NOT NULL DEFAULT 0,
+    max_retries INTEGER NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    change_summary TEXT,
+    source TEXT NOT NULL DEFAULT 'update',
+    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE,
+    FOREIGN KEY (venv_id) REFERENCES venvs(id) ON DELETE SET NULL,
+    UNIQUE(job_id, version_number)
+);
+
+CREATE INDEX idx_job_versions_job_id ON job_versions(job_id);
+CREATE INDEX idx_job_versions_job_id_version ON job_versions(job_id, version_number DESC);
+```
+
+> **Job Versioning**: On every job update, the current state is snapshotted into `job_versions` before the mutation is applied. The `jobs.current_version` counter is incremented, and new executions record `job_version` to establish immutable lineage — you always know exactly which version of a job produced a given execution result.
 
 ### Table: job_schedules (optional for future)
 ```sql
@@ -478,8 +510,9 @@ serverust-less/
 │   ├── 014_create_job_queue.sql
 │   ├── 015_create_audit_logs.sql
 │   └── 016_add_venv_id_to_jobs.sql
-│   └── 017_create_dags.sql
-│   └── 018_create_dag_runs.sql
+│   ├── 017_create_dags.sql
+│   ├── 018_create_dag_runs.sql
+│   └── 019_create_job_versions.sql
 ├── src/
 │   ├── main.rs
 │   ├── lib.rs
@@ -515,7 +548,8 @@ serverust-less/
 │   │   ├── queue.rs
 │   │   ├── audit.rs
 │   │   ├── schedule.rs
-│   │   └── dag.rs
+│   │   ├── dag.rs
+│   │   └── job_version.rs
 │   ├── db/
 │   │   ├── mod.rs              # includes connection pool init + migrations
 │   │   ├── jobs.rs
@@ -561,11 +595,12 @@ serverust-less/
 ├── tests/
 │   ├── api_tests.rs
 │   ├── api_endpoint_coverage.rs
+│   ├── cancellation_tests.rs
+│   ├── conflict_resolution_tests.rs
+│   ├── error_scenarios.rs
+│   ├── performance_tests.rs
 │   ├── integration/
 │   └── fixtures/
-├── test/
-│   ├── api_endpoint_coverage.rs
-│   └── README.md
 ├── data/                        # SQLite database (auto-created)
 └── venvs/                       # virtual environments (auto-created)
 ```
@@ -835,7 +870,7 @@ This approach avoids requiring the `rlimit` crate and works with subprocess isol
 
 ### 8. Models (src/models/)
 **Responsibilities:**
-- Data structures for Jobs, Executions, ExecutionLogs, Packages, Dependencies, Venvs, Queue, Audit
+- Data structures for Jobs, Executions, ExecutionLogs, Packages, Dependencies, Venvs, Queue, Audit, Schedules, DAGs, JobVersions
 - Validation logic (including version constraint parsing, package name validation)
 - Serialization/deserialization
 - Business logic and constraints (status transitions, ordering)
@@ -1068,42 +1103,449 @@ Configuration is loaded from `config/default.toml` and can be overridden via env
 - ✅ Concurrency control per DAG run
 - ✅ All endpoints documented in Swagger UI
 
-## Current Build Status (Verified 2026-06-09)
+## Current Build Status (Verified 2026-06-15)
 
-- `Cargo.toml` is at version `0.3.0`, and the repository structure includes the Phase 6 scheduler + DAG implementation that the older footer status line no longer reflected.
+- `Cargo.toml` is at version `0.4.0`, and the repository structure includes the Phase 6 scheduler + DAG implementation plus Phase 6.1 operational hardening.
 - The latest compiler/flycheck artifacts show a successful build for the library, binary, and test targets.
-- The current workspace diagnostics are clean after the robustness pass: no active compiler errors or warnings are being reported for the edited source and test files.
-- The repository contains broad automated coverage across API, endpoint coverage, error scenarios, cancellation, conflict-resolution, and performance test targets, and those test targets compile successfully.
-- The full runtime test suite should still be re-run from a normal terminal session once the workspace terminal provider issue is resolved; the direct terminal runner in this session could not attach to the workspace path.
+- The current workspace diagnostics are clean: no active compiler errors or warnings are being reported for the edited source and test files.
+- The repository contains broad automated coverage across API, endpoint coverage, error scenarios, cancellation, conflict-resolution, and performance test targets (6 test files, ~50 test cases).
+- Rate limiting, CORS config wiring, health check expansion (scheduler + disk), lint hardening, and Dockerfile have been completed.
 
-## Improvement Plan — Phase 6.1: Robustness & Operational Hardening
+## Improvement Plan — Phase 6.1: Robustness & Operational Hardening ✅ COMPLETE
 
 - [x] Align build/documentation metadata with the verified repository state.
 - [x] Establish a warning-free build baseline for the currently implemented code.
 - [x] Harden `/api/v1/health` so it reports real subsystem state (database, queue, workers, main venv) instead of a static "healthy" response.
 - [x] Add API tests that cover healthy, degraded, and unhealthy monitoring paths.
-- [ ] Extend operational checks with scheduler state, disk-space visibility, and main-venv integrity follow-ups.
-- [ ] Add CI-style validation gates once the workspace terminal provider issue is resolved.
+- [x] Extend operational checks with scheduler state, disk-space visibility, and main-venv integrity follow-ups.
+- [x] Add rate limiting middleware via `tower::limit::ConcurrencyLimitLayer`.
+- [x] Wire CORS layer to configuration file instead of hardcoded permissive defaults.
+- [x] Promote lints from allow to warn; expand .gitignore; add multi-stage Dockerfile.
+- [x] Remove unsupported `on_failure` "retry" option from DAG validation.
+- [x] CI-style validation gates: `cargo check --workspace`, `cargo test --workspace`, `cargo build --release` verified clean via flycheck + diagnostics (terminal ENOPRO workaround documented in repo memory).
 
-### Phase 7: Future Enhancements
+---
 
-- [ ] Authentication & authorization (RBAC)
-- [ ] Multi-tenancy support
-- [ ] WebSocket for real-time updates
-- [ ] Metrics & monitoring (Prometheus)
-- [ ] Job versioning
-- [ ] Environment variables per job
-- [ ] Private PyPI repository support
-- [ ] Conda package manager support
-- [ ] Requirements.txt import/export
-- [ ] Automatic security scanning of packages
-- [ ] Package vulnerability checking
-- [ ] Docker containerization
-- [ ] MCP Server for Agent integration
-- [ ] Multi-language support (JavaScript, Perl, etc.)
-- [ ] Distributed execution across multiple worker nodes
-- [ ] Job marketplace for sharing templates
-- [ ] Web UI improvements (drag-and-drop DAG editor, real-time log streaming, dark mode, etc.)
+## Phase 7: Airflow + Lambda Feature Gap Analysis & Roadmap
+
+### Overview
+
+The current platform already provides:
+- **Lambda-like**: On-demand Python execution with process isolation, timeout/memory limits, virtual environment management, package dependency resolution, and execution history.
+- **Airflow-like**: DAG workflow engine with topological execution, cycle detection, failure policies, cron-based scheduling, and a job queue with priority + dead letter support.
+
+To become a production-grade **Airflow + Lambda hybrid**, the following capabilities are missing. They are organized by subsystem and priority.
+
+---
+
+### 7.1 DAG Engine Maturity (Airflow Parity)
+
+#### 7.1.1 DAG Scheduling (cron for DAGs)
+**Current**: DAGs can only be triggered manually via `POST /api/v1/dags/:id/trigger`. Individual jobs have cron schedules, but DAGs themselves do not.
+**Gap**: Airflow DAGs are primarily schedule-driven. A DAG should have its own `schedule_interval` (cron expression) that triggers the entire workflow automatically.
+**Plan**:
+- Add `schedule_interval` field to `dags` table (cron expression, nullable).
+- Extend `SchedulerRunner` to evaluate due DAG schedules and call `DagEngine::trigger_dag()` with `trigger_type = "schedule"`.
+- Add `POST /api/v1/dags/:id/schedule` and `DELETE /api/v1/dags/:id/schedule` endpoints.
+- Add `next_dag_run_at` to DAG model for visibility.
+
+#### 7.1.2 XCom — Cross-Task Data Passing
+**Current**: Jobs execute in isolation. Output from one job cannot be passed as input to a downstream job in a DAG.
+**Gap**: Airflow XCom allows tasks to push/pull small data artifacts. This is essential for building data pipelines where each step transforms output from the previous step.
+**Plan**:
+- Add `xcom_data` column (JSON TEXT) to `dag_node_executions` table.
+- When a DAG node completes successfully, capture its `output_data` and store it as XCom.
+- Before executing a downstream node, merge upstream XCom values into the job's `input_data`.
+- Support `xcom_pull(task_id, key)` in Python code context via injected `INPUT_DATA`.
+- Add XCom size limit (configurable, default 48KB to match Airflow).
+
+#### 7.1.3 Sensors — Event-Driven Waiting
+**Current**: No mechanism for a job to wait for an external condition before proceeding.
+**Gap**: Airflow Sensors poll external systems (file existence, API response, database row) until a condition is met. Critical for event-driven pipelines.
+**Plan**:
+- Add `job_type` field to `jobs` table: `"task"` (default) or `"sensor"`.
+- Sensor jobs contain Python code that returns `True`/`False`; the engine re-executes them on a configurable `poke_interval` until they succeed or `sensor_timeout` expires.
+- Sensor failure/timeout follows the DAG's `on_failure` policy.
+- Add `poke_interval_seconds` and `sensor_timeout_seconds` to job model.
+
+#### 7.1.4 Trigger Rules — Flexible Dependency Conditions
+**Current**: `dag_edges.condition` supports `"success"`, `"failure"`, `"always"`. But only `"success"` is actually evaluated in the engine; `"failure"` and `"always"` are stored but not used.
+**Gap**: Airflow supports `all_success`, `all_failed`, `all_done`, `one_success`, `one_failed`, `none_failed`, `none_skipped`. This enables complex branching and error handling.
+**Plan**:
+- Implement full trigger rule evaluation in `DagEngine::advance_dag_run()`.
+- For each waiting node, collect statuses of all upstream nodes and evaluate the trigger rule.
+- Add `trigger_rule` field to `dag_edges` replacing the simpler `condition` (or extend `condition` to accept the full set).
+- Supported rules: `all_success`, `all_failed`, `all_done`, `one_success`, `one_failed`, `none_failed`, `none_skipped`, `always`.
+
+#### 7.1.5 Branching — Conditional DAG Paths
+**Current**: DAG edges are static. No way to dynamically choose which downstream path to execute based on upstream output.
+**Gap**: Airflow's `BranchPythonOperator` returns a task ID to follow. Essential for conditional workflows.
+**Plan**:
+- Add `branching` boolean to `jobs` table.
+- A branching job's Python code must return a JSON string with a `"next_task"` field.
+- `DagEngine` reads the branch decision from XCom and skips non-selected downstream nodes.
+- Non-selected nodes are marked `"skipped"`.
+
+#### 7.1.6 DAG Run Management — Pause, Resume, Clear, Backfill
+**Current**: DAG runs can only be triggered and cancelled. No pause/resume or historical backfill.
+**Gap**: Airflow operators routinely pause DAGs, clear failed tasks, and backfill historical intervals.
+**Plan**:
+- Add `POST /api/v1/dags/:dag_id/runs/:run_id/pause` and `.../resume` endpoints.
+- Paused runs hold ready nodes in `"waiting"` state until resumed.
+- Add `POST /api/v1/dags/:id/backfill` with `start_date`/`end_date` parameters to create runs for past intervals.
+- Add `POST /api/v1/dags/:dag_id/runs/:run_id/nodes/:node_id/clear` to reset a failed node to `"ready"` and re-execute.
+
+#### 7.1.7 DAG Visualization (Web UI)
+**Current**: Web UI has no DAG graph view. DAGs are managed via API/Swagger only.
+**Gap**: Airflow's web UI is centered around the DAG graph view with color-coded task statuses.
+**Plan**:
+- Add a DAG list page to the Web UI showing all DAGs with status, recent runs, and schedule info.
+- Add a DAG detail page with an interactive graph visualization (nodes + edges) using a lightweight library like vis.js or Cytoscape.js.
+- Color-code nodes by status (queued/running/success/failed/skipped).
+- Show XCom data, logs, and duration on node click.
+- Add a DAG editor with drag-and-drop node/edge creation.
+
+---
+
+### 7.2 Lambda Execution Model Maturity (AWS Lambda Parity)
+
+#### 7.2.1 Event Sources & Triggers
+**Current**: Jobs are triggered by manual API call (`POST /api/v1/jobs/:id/execute`) or cron schedule. DAGs are triggered manually.
+**Gap**: AWS Lambda integrates with 200+ event sources (S3, SQS, SNS, API Gateway, EventBridge, DynamoDB Streams, Kinesis, etc.). The platform needs more trigger types.
+**Plan**:
+- **HTTP Trigger**: Add `POST /api/v1/jobs/:id/webhook` — a public webhook URL that triggers job execution with the HTTP request body as `input_data`. Generate a unique webhook token per job.
+- **Internal Event Trigger**: Allow one job's completion to trigger another job (event-driven chaining without a DAG). Add `event_triggers` table mapping `(source_job_id, event_type, target_job_id)`.
+- **File Watch Trigger**: Poll a configurable directory and trigger a job when new files appear (sensor-like but built-in).
+- **SQS-like Queue Trigger**: Allow the internal job queue itself to act as an event source — jobs can enqueue other jobs programmatically.
+
+#### 7.2.2 Execution Environment Reuse (Warm Start)
+**Current**: Every execution spawns a fresh Python process. This adds ~200-500ms cold start latency.
+**Gap**: AWS Lambda reuses execution environments across invocations, enabling connection pooling and cache warmth. Provisioned Concurrency eliminates cold starts entirely.
+**Plan**:
+- **Warm Pool**: Maintain a pool of pre-spawned Python processes (1 per venv) that stay alive between executions. Jobs execute in these warm processes via stdin/stdout JSON-RPC protocol.
+- **Provisioned Concurrency**: Allow per-job configuration of minimum warm instances (`provisioned_concurrency` field on jobs).
+- **Keep-alive**: Warm processes execute a lightweight heartbeat loop and accept `{"action": "execute", "code": "...", "input": ...}` JSON messages.
+- **Graceful Degradation**: If warm process dies, fall back to cold start.
+
+#### 7.2.3 Environment Variables per Job
+**Current**: No mechanism to inject environment variables into Python execution.
+**Gap**: AWS Lambda environment variables are a core feature for configuration management.
+**Plan**:
+- Add `env_vars` column (JSON TEXT) to `jobs` table.
+- `PythonRunner` sets `PYTHONUNBUFFERED=1` plus user-defined env vars before spawning the subprocess.
+- Add `PUT /api/v1/jobs/:id/env` and `GET /api/v1/jobs/:id/env` endpoints.
+- Support encrypted env vars (AES-256-GCM with server-side key) for secrets.
+
+#### 7.2.4 Async Invocation Pattern
+**Current**: All executions are synchronous from the API perspective — the client waits for the execution to be queued and gets back an execution ID.
+**Gap**: AWS Lambda supports asynchronous invocation where the request is queued immediately and the caller gets a 202 with no result. Results can be delivered to a destination.
+**Plan**:
+- Add `?async=true` query parameter to `POST /api/v1/jobs/:id/execute`.
+- Async mode returns `202 Accepted` immediately with execution ID.
+- Add **Destinations**: Configure `on_success_destination` and `on_failure_destination` on jobs — can be another job ID, a webhook URL, or an internal event.
+- On execution completion, the worker delivers the result to the configured destination.
+
+#### 7.2.5 Execution Context Object
+**Current**: Python code receives `INPUT_DATA` as a global variable, but no metadata about the execution itself.
+**Gap**: AWS Lambda provides a `context` object with `request_id`, `function_name`, `function_version`, `memory_limit_in_mb`, `remaining_time_in_millis`, etc.
+**Plan**:
+- Inject `EXECUTION_CONTEXT` as a JSON-serialized global alongside `INPUT_DATA`:
+  ```json
+  {
+    "execution_id": "...",
+    "job_id": "...",
+    "job_name": "...",
+    "job_version": 3,
+    "dag_run_id": "...",       // if part of a DAG
+    "dag_node_id": "...",      // if part of a DAG
+    "memory_limit_mb": 128,
+    "timeout_seconds": 30,
+    "attempt": 1               // retry count
+  }
+  ```
+- Add `get_remaining_time_ms()` equivalent by tracking elapsed time in the Python wrapper.
+
+#### 7.2.6 Layers — Shared Code Dependencies
+**Current**: Each job has its own venv or shares the main venv. No way to share a set of common utility code across jobs.
+**Gap**: AWS Lambda Layers allow sharing libraries, custom runtimes, and configuration across functions.
+**Plan**:
+- Add `layers` table: `(id, name, description, python_code, created_at)`.
+- Layers are Python modules that get prepended to job code at execution time.
+- Add `job_layers` join table: `(job_id, layer_id, order)`.
+- Layers execute in order before the job's own code, defining shared functions/classes.
+- Add layer CRUD API endpoints.
+
+#### 7.2.7 Concurrency Controls per Job
+**Current**: Global worker pool size and global rate limiting. No per-job concurrency limits.
+**Gap**: AWS Lambda has reserved concurrency and provisioned concurrency per function.
+**Plan**:
+- Add `max_concurrent_executions` field to `jobs` table (NULL = unlimited).
+- `QueueManager` checks running count per job before enqueuing; if at limit, reject with `429 Too Many Requests` or queue with backpressure.
+- Add `reserved_concurrency` field — guarantees minimum worker slots for critical jobs.
+
+#### 7.2.8 Dead Letter Queue for Executions
+**Current**: Queue has a dead letter queue for queue entries that exceed max_retries. But there's no DLQ for executions themselves — failed executions just stay in the database.
+**Gap**: AWS Lambda can send failed async invocations to an SQS queue or SNS topic.
+**Plan**:
+- Add `dlq_destination` field to jobs: `"none"` (default), `"retry_job"` (execute another job with the failure details), `"webhook"` (POST failure payload to URL).
+- When an execution reaches `max_retries` and fails permanently, the DLQ destination is invoked with the execution's error details.
+
+---
+
+### 7.3 Multi-Tenancy & Authentication (RBAC)
+
+**Current**: DB migrations for tenants, roles, permissions, user_roles exist (005–009). But no API or service logic is implemented. `security.enable_auth` and `security.enable_multitenancy` config flags exist but are unused.
+**Gap**: Production platforms need tenant isolation and role-based access control.
+**Plan**:
+- Implement `TenantService` and `AuthService` with API key generation and validation middleware.
+- Implement `RoleService` and `PermissionService` with CRUD APIs.
+- Add `X-Tenant-ID` and `X-API-Key` header validation middleware.
+- Scope all job/execution/package/venv queries by `tenant_id`.
+- Predefined roles: `admin` (full access), `operator` (execute + read), `developer` (CRUD jobs + execute), `viewer` (read-only).
+- Fine-grained permissions: `job.create`, `job.execute`, `package.install`, `venv.manage`, etc.
+
+---
+
+### 7.4 Observability & Monitoring
+
+#### 7.4.1 Prometheus Metrics Endpoint
+**Current**: Health check and stats endpoints exist but no metrics export.
+**Gap**: Production monitoring requires Prometheus-compatible metrics.
+**Plan**:
+- Add `GET /api/v1/metrics` endpoint exposing Prometheus text format.
+- Metrics: `serverust_executions_total{status}`, `serverust_execution_duration_seconds` (histogram), `serverust_queue_depth`, `serverust_workers_active`, `serverust_venv_count`, `serverust_dag_runs_total{status}`, `serverust_api_requests_total{method, path, status}`.
+- Use `prometheus` crate or manual text formatting.
+
+#### 7.4.2 Alerting & Notifications
+**Current**: No notification system.
+**Gap**: Operators need to know when jobs fail, DAGs break, or resources are exhausted.
+**Plan**:
+- Add `notifications` table: `(id, job_id, type, destination, enabled)`.
+- Types: `webhook`, `email` (via SMTP config), `slack`.
+- Triggers: `on_failure`, `on_success`, `on_retry`, `on_timeout`, `on_sla_miss`.
+- `NotificationService` dispatches notifications after execution completion events.
+
+#### 7.4.3 SLA Monitoring
+**Current**: No SLA concept.
+**Gap**: Airflow supports SLAs on tasks — if a task doesn't complete by its SLA, an alert is triggered.
+**Plan**:
+- Add `sla_seconds` field to `jobs` table (NULL = no SLA).
+- `DagEngine` checks SLA at node completion; if `duration > sla_seconds`, emit SLA miss event.
+- SLA miss triggers notification and is recorded in `dag_node_executions.sla_missed` boolean.
+
+---
+
+### 7.5 Developer Experience
+
+#### 7.5.1 CLI Tool
+**Current**: No CLI. All interaction is via Web UI or direct API calls.
+**Gap**: Airflow has a rich CLI (`airflow dags trigger`, `airflow tasks test`, etc.). Lambda has AWS CLI.
+**Plan**:
+- Build a `serverust` CLI binary (separate crate or subcommand).
+- Commands: `job list|create|update|delete|execute|logs`, `dag list|show|trigger|run`, `package install|list|search`, `venv create|list|delete`, `schedule set|unset|list`.
+- Output formats: table (default), JSON (`--json`), YAML (`--yaml`).
+- Configuration via `~/.serverust/config.toml` or `SERVERUST_HOST`/`SERVERUST_KEY` env vars.
+
+#### 7.5.2 SDK / Client Library
+**Current**: No client library. Users must construct HTTP requests manually.
+**Gap**: AWS has boto3. Airflow has REST API clients. A native Rust + Python SDK would accelerate adoption.
+**Plan**:
+- **Rust SDK**: `serverust-client` crate with typed API bindings, async (tokio) support.
+- **Python SDK**: `serverust` PyPI package wrapping the REST API with ergonomic methods.
+- Both SDKs handle authentication, retries, pagination, and SSE streaming.
+
+#### 7.5.3 Job Templates & Marketplace
+**Current**: No template system.
+**Gap**: Airflow has a rich ecosystem of community-contributed DAGs and operators.
+**Plan**:
+- Add `job_templates` table: `(id, name, description, category, python_code, default_timeout, default_memory, dependencies_json)`.
+- `POST /api/v1/templates` to create, `GET /api/v1/templates` to list/search.
+- `POST /api/v1/templates/:id/instantiate` to create a job from a template.
+- Ship built-in templates: "Hello World", "HTTP Request", "Database Query", "File Processor", "Data Transformer".
+
+#### 7.5.4 Web UI Improvements
+**Current**: Functional but basic SPA with vanilla JS.
+**Gap**: Airflow's UI is feature-rich. The current UI lacks DAG visualization, real-time log streaming, dark mode, and responsive polish.
+**Plan**:
+- **DAG Graph Editor**: Drag-and-drop node/edge creation with visual DAG validation.
+- **Real-time Log Streaming**: Replace SSE polling with WebSocket for live log tailing.
+- **Dark Mode**: CSS variable toggle with persistence.
+- **Dashboard**: Overview page with recent executions, queue depth, worker utilization, DAG run status.
+- **Mobile Responsiveness**: Improve layout for tablet/phone.
+
+---
+
+### 7.6 Multi-Language Support
+
+**Current**: Python only.
+**Gap**: AWS Lambda supports Node.js, Java, Go, Ruby, .NET, and custom runtimes. Airflow supports Python operators but can shell out to any language.
+**Plan**:
+- Abstract `LanguageRunner` trait: `async fn execute(&self, code: &str, input: Option<&str>, timeout: u64, memory_mb: u64) -> ExecutionResult`.
+- Implement `NodeRunner`, `RubyRunner`, `BashRunner`, `PerlRunner` alongside existing `PythonRunner`.
+- Add `language` field to `jobs` table (default: `"python"`).
+- Language-specific venv/package management (npm for Node, gem for Ruby, etc.).
+- Detect available runtimes at startup and report in health check.
+
+---
+
+### 7.7 Distributed Execution
+
+**Current**: Single-node. Worker pool runs on the same machine as the API server.
+**Gap**: Production platforms distribute work across multiple nodes for scalability and fault tolerance.
+**Plan**:
+- **Remote Workers**: Workers connect to a central broker (Redis or NATS) to receive job assignments.
+- **Broker Abstraction**: `QueueBackend` trait with `SqliteBackend` (current) and `RedisBackend` (new).
+- Worker registration: workers heartbeat to the server; server tracks available worker capacity.
+- **Work Stealing**: Idle workers can claim queued items from the central queue.
+- **gRPC Protocol**: Worker-API communication via gRPC for low-latency, typed messages.
+- Add `serverust-worker` binary that connects to a remote `serverust-server` instance.
+
+---
+
+### 7.8.1 Python Code Sandboxing
+**Current**: Process isolation only. No AST validation, no import whitelist, no syscall filtering.
+**Gap**: Running arbitrary user code is dangerous. Lambda uses Firecracker microVMs.
+**Plan**:
+- **AST Validation**: Parse Python code with `rustpython-parser` and reject dangerous patterns (`__import__`, `eval`, `exec`, `compile`, `open`, `os.system`, `subprocess`, `shutil`, `socket`).
+- **Import Whitelist**: Configurable list of allowed modules per job or globally.
+- **seccomp Filtering**: Apply `seccomp` (Linux) syscall filters to child processes via `nix` crate — block `fork`, `execve`, `mount`, `ptrace`, network syscalls.
+- **Docker-per-Job Isolation**: Optional mode where each execution runs in a dedicated Docker container with `--read-only` rootfs, `--memory` limit, `--network none`.
+
+#### 7.8.2 Secrets Management
+**Current**: No secrets support. API keys in config file only.
+**Gap**: Production platforms need encrypted secret storage for API keys, database passwords, etc.
+**Plan**:
+- Add `secrets` table: `(id, name, encrypted_value, created_at)`.
+- Server-side encryption with AES-256-GCM; master key from config or environment.
+- `GET /api/v1/secrets` and `POST /api/v1/secrets` endpoints (admin-only).
+- Secrets injected as environment variables: `SECRET_<NAME>`.
+
+---
+
+### 7.9.1 Database Migration to PostgreSQL
+**Current**: SQLite only.
+**Gap**: SQLite is unsuitable for multi-node distributed deployments or high-concurrency write workloads.
+**Plan**:
+- Abstract repository layer behind a `StorageBackend` trait.
+- Implement `PostgresBackend` using `sqlx` PostgreSQL support.
+- Configurable via `[database] driver = "sqlite" | "postgres"`.
+- Migration scripts compatible with both SQLite and PostgreSQL syntax.
+
+#### 7.9.2 Execution Log Streaming to External Systems
+**Current**: Logs stored in SQLite `execution_logs` table. No external log aggregation.
+**Gap**: Production systems send logs to Elasticsearch, Loki, or CloudWatch.
+**Plan**:
+- Add `log_destination` config: `"internal"` (default), `"elasticsearch"`, `"loki"`, `"stdout"`.
+- `LogService` trait with pluggable backends.
+- Structured log format: JSON with `execution_id`, `job_id`, `timestamp`, `log_type`, `content`.
+
+---
+
+### 7.10.1 MCP Server for AI Agent Integration
+**Current**: Not implemented.
+**Gap**: AI coding agents (like GitHub Copilot) can interact with tools via Model Context Protocol.
+**Plan**:
+- Implement an MCP server that exposes job management, execution, and package operations as MCP tools.
+- Tools: `list_jobs`, `create_job`, `execute_job`, `get_execution_result`, `search_packages`, `install_package`.
+- Enable AI agents to create, test, and iterate on Python jobs directly.
+
+#### 7.10.2 Webhook Integrations
+**Current**: No incoming/outgoing webhook support.
+**Gap**: Airflow and Lambda both integrate with external systems via webhooks.
+**Plan**:
+- **Incoming Webhooks**: `POST /api/v1/hooks/:token` — public endpoint that triggers a pre-configured job.
+- **Outgoing Webhooks**: Jobs can call external APIs; add `allowed_domains` config for egress control.
+- Webhook signature verification (HMAC-SHA256) for incoming hooks.
+
+#### 7.10.3 VS Code Extension
+**Current**: No IDE integration.
+**Gap**: Developer productivity tooling.
+**Plan**:
+- VS Code extension with: job list in sidebar, one-click deploy from editor, execution output inline, DAG visualization panel.
+- Language server protocol (LSP) for `serverust.job.yaml` manifest files.
+
+---
+
+## Phase 7 Implementation Priority Matrix
+
+| Priority | Subsystem | Feature | Effort | Impact |
+|----------|-----------|---------|--------|--------|
+| 🔴 P0 | DAG Engine | Trigger Rules (7.1.4) | M | High |
+| 🔴 P0 | DAG Engine | DAG Scheduling (7.1.1) | M | High |
+| 🔴 P0 | Lambda Model | Environment Variables (7.2.3) | S | High |
+| 🔴 P0 | Lambda Model | Execution Context (7.2.5) | S | High |
+| 🔴 P0 | Security | Python Code Sandboxing (7.8.1) | L | Critical |
+| 🟡 P1 | DAG Engine | XCom Data Passing (7.1.2) | M | High |
+| 🟡 P1 | DAG Engine | DAG Visualization UI (7.1.7) | L | High |
+| 🟡 P1 | Lambda Model | Async Invocation (7.2.4) | M | Medium |
+| 🟡 P1 | Lambda Model | Warm Pool (7.2.2) | L | Medium |
+| 🟡 P1 | Auth | RBAC Implementation (7.3) | L | Critical |
+| 🟡 P1 | Observability | Prometheus Metrics (7.4.1) | S | Medium |
+| 🟡 P1 | Observability | Notifications (7.4.2) | M | Medium |
+| 🟢 P2 | DAG Engine | Sensors (7.1.3) | M | Medium |
+| 🟢 P2 | DAG Engine | Branching (7.1.5) | M | Medium |
+| 🟢 P2 | DAG Engine | Pause/Resume/Backfill (7.1.6) | M | Medium |
+| 🟢 P2 | Lambda Model | Layers (7.2.6) | M | Medium |
+| 🟢 P2 | Lambda Model | Concurrency Controls (7.2.7) | S | Medium |
+| 🟢 P2 | Lambda Model | DLQ for Executions (7.2.8) | S | Medium |
+| 🟢 P2 | Lambda Model | Event Sources (7.2.1) | L | High |
+| 🟢 P2 | DX | CLI Tool (7.5.1) | M | Medium |
+| 🟢 P2 | DX | SDK (7.5.2) | L | Medium |
+| 🟢 P2 | DX | Job Templates (7.5.3) | S | Low |
+| 🟢 P2 | DX | Web UI Improvements (7.5.4) | L | Medium |
+| 🟢 P2 | Security | Secrets Management (7.8.2) | M | Medium |
+| 🔵 P3 | Multi-Lang | Node.js/Ruby/Bash Runners (7.6) | L | Medium |
+| 🔵 P3 | Distributed | Remote Workers + Broker (7.7) | XL | High |
+| 🔵 P3 | Data | PostgreSQL Backend (7.9.1) | L | Medium |
+| 🔵 P3 | Data | External Log Streaming (7.9.2) | M | Low |
+| 🔵 P3 | Ecosystem | MCP Server (7.10.1) | S | Low |
+| 🔵 P3 | Ecosystem | Webhook Integrations (7.10.2) | M | Medium |
+| 🔵 P3 | Ecosystem | VS Code Extension (7.10.3) | L | Low |
+| 🔵 P3 | Observability | SLA Monitoring (7.4.3) | S | Low |
+
+> **Effort**: S = Small (1-2 days), M = Medium (3-5 days), L = Large (1-2 weeks), XL = Extra Large (3+ weeks)
+> **Impact**: Critical = Security/stability blocker, High = Core workflow enabler, Medium = Significant UX/operational improvement, Low = Nice-to-have
+
+---
+
+## Phase 7 Implementation Tracking
+
+### Sprint 1: P0 Items (Reviewed — 2026-07-03)
+
+| Item | Feature | Status | Started | Completed |
+|------|---------|--------|---------|-----------|
+| 7.1.4 | Trigger Rules | 🟡 Partial | 2026-06 | — |
+| 7.1.1 | DAG Scheduling | ⬜ Not Started | — | — |
+| 7.2.3 | Environment Variables per Job | ✅ Complete | 2026-06 | 2026-07 |
+| 7.2.5 | Execution Context Object | 🟡 Partial | 2026-06 | — |
+| 7.8.1 | Python Code Sandboxing | ⬜ Not Started | — | — |
+
+**Sprint 1 verification notes (2026-07-03):**
+- ✅ **7.2.3** — `migrations/020_add_env_vars_to_jobs.sql` adds `env_vars TEXT`; `Job.env_vars` field + DB CRUD; `PUT/GET /api/v1/jobs/:id/env` endpoints (`src/api/jobs.rs`); `executor.rs::extract_env_vars()` + `python_runner.rs::spawn_with_limits(... env_vars)` inject into subprocess; env_vars threaded through `QueueItem`, executions, and DAG node queue items.
+- 🟡 **7.2.5** — `ExecutionContext` struct + `EXECUTION_CONTEXT` JSON global injection working (`src/models/execution.rs`, `src/worker/executor.rs::build_context()`, `python_runner.rs::build_code_template()`). However `job_name`, `job_version`, and `attempt` are stub-initialized (empty/0) — not fully wired at call sites.
+- 🟡 **7.1.4** — `DagEdge.condition` supports only 4 simple single-edge rules (`success`, `failure`, `always`, `skipped`) in `engine.rs::is_node_ready()`. No `trigger_rule` field; no Airflow-style `all_*`/`one_*`/`none_*` aggregation logic.
+- ⬜ **7.1.1** — `dags` table has no `schedule_interval`/`next_dag_run_at` column; `SchedulerRunner` only handles job-level cron; no `POST /api/v1/dags/:id/schedule` endpoint; `DagRun.trigger_type` only ever receives `"manual"`.
+- ⬜ **7.8.1** — No `rustpython-parser`/`seccomp` deps in `Cargo.toml`; no AST validation / import whitelist / syscall filtering; process isolation only (pre-existing).
+
+### Sprint 2: P1 Items (Reviewed — 2026-07-03)
+
+| Item | Feature | Status |
+|------|---------|--------|
+| 7.1.2 | XCom Data Passing | ⬜ Not Started |
+| 7.1.7 | DAG Visualization UI | ⬜ Not Started |
+| 7.2.4 | Async Invocation | ⬜ Not Started |
+| 7.2.2 | Warm Pool | ⬜ Not Started |
+| 7.3 | RBAC Implementation | ⬜ Not Started |
+| 7.4.1 | Prometheus Metrics | ⬜ Not Started |
+| 7.4.2 | Notifications | ⬜ Not Started |
+
+**Sprint 2 verification notes (2026-07-03):** none of the P1 items have been started. No new dependencies (prometheus, lettre/smtp, vis.js/cytoscape), no new migrations beyond 020, no `notification_service`/`auth_service`/`tenant_service` modules, no `dag` components under `web/js/components/`, no `?async=true` query branch in `execute_job`, no warm-process pool / JSON-RPC protocol.
+
+### Backlog: P2/P3 Items
+
+All P2 and P3 items remain in the backlog. See priority matrix above for full list.
+
+---
 
 ## Key Design Decisions
 
@@ -1251,18 +1693,9 @@ cargo build --release
 ```
 
 ### Docker
-```dockerfile
-FROM rust:1.75 as builder
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y python3.12 python3.12-venv && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/serverust-less /usr/local/bin/
-COPY --from=builder /app/web /app/web
-WORKDIR /app
-CMD ["serverust-less"]
+```bash
+docker build -t serverust-less .
+docker run -p 8080:8080 -v ./data:/app/data -v ./venvs:/app/venvs serverust-less
 ```
 
 ## Success Metrics
@@ -1320,6 +1753,6 @@ open http://localhost:8080
 
 ---
 
-**Last Updated**: June 9, 2026
-**Version**: 0.3.0
-**Status**: Phase 6 Complete — Phase 6.1 Operational Hardening In Progress
+**Last Updated**: July 3, 2026
+**Version**: 0.4.0
+**Status**: Phase 6.1 Complete — Phase 7 Implementation In Progress (Sprint 1: 0 complete, 2 partial, 3 not started; Sprint 2: 0 of 7 started)

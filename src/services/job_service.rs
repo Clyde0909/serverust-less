@@ -143,6 +143,7 @@ impl JobService {
             max_retries: None,
             enabled: Some(true),
             change_summary: Some("Enabled job".to_string()),
+            env_vars: None,
         };
         self.update_job(id, update).await
     }
@@ -161,6 +162,7 @@ impl JobService {
             max_retries: None,
             enabled: Some(false),
             change_summary: Some("Disabled job".to_string()),
+            env_vars: None,
         };
         self.update_job(id, update).await
     }
@@ -209,6 +211,7 @@ impl JobService {
             venv_id: source.venv_id,
             priority: source.priority,
             max_retries: source.max_retries,
+            env_vars: source.env_vars.clone(),
         };
 
         let job = Job::new(req);

@@ -38,6 +38,8 @@ pub struct Job {
     pub updated_at: String,
     /// Whether the job is enabled
     pub enabled: bool,
+    /// Environment variables to inject at execution time (JSON object)
+    pub env_vars: Option<serde_json::Value>,
 }
 
 /// Request to create a new job
@@ -73,6 +75,9 @@ pub struct CreateJobRequest {
     #[serde(default)]
     #[validate(range(min = 0, max = 10, message = "Max retries must be 0-10"))]
     pub max_retries: i32,
+    /// Environment variables to inject at execution time (JSON object, default: null)
+    #[serde(default)]
+    pub env_vars: Option<serde_json::Value>,
 }
 
 /// Request to update an existing job
@@ -108,6 +113,8 @@ pub struct UpdateJobRequest {
     /// Optional human-readable summary for the new version snapshot
     #[validate(length(max = 500, message = "Change summary must be at most 500 characters"))]
     pub change_summary: Option<String>,
+    /// Environment variables to inject at execution time (JSON object, null = no change)
+    pub env_vars: Option<serde_json::Value>,
 }
 
 /// Immutable snapshot of a job definition at a specific version.
@@ -145,6 +152,8 @@ pub struct JobVersion {
     pub change_summary: Option<String>,
     /// Origin of this snapshot: create, update, restore, clone, etc.
     pub source: String,
+    /// Environment variables at this version
+    pub env_vars: Option<serde_json::Value>,
 }
 
 /// Response payload for listing all versions of a job.
@@ -244,6 +253,7 @@ impl Job {
             created_at: now.clone(),
             updated_at: now,
             enabled: false,
+            env_vars: req.env_vars,
         }
     }
 
@@ -282,6 +292,10 @@ impl Job {
         if let Some(enabled) = req.enabled {
             self.enabled = enabled;
         }
+        // env_vars: None = no change, Some(v) = replace
+        if req.env_vars.is_some() {
+            self.env_vars = req.env_vars;
+        }
         self.updated_at = Utc::now().to_rfc3339();
     }
 }
@@ -306,6 +320,7 @@ impl JobVersion {
             created_at: Utc::now().to_rfc3339(),
             change_summary,
             source: source.to_string(),
+            env_vars: job.env_vars.clone(),
         }
     }
 }

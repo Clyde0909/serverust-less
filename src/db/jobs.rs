@@ -26,8 +26,8 @@ impl JobRepository {
             r#"
             INSERT INTO jobs (
                 id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled, env_vars
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&job.id)
@@ -44,6 +44,7 @@ impl JobRepository {
         .bind(&job.created_at)
         .bind(&job.updated_at)
         .bind(job.enabled)
+        .bind(&job.env_vars)
         .execute(&self.pool)
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -59,7 +60,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled, env_vars
             FROM jobs
             WHERE id = ?
             "#,
@@ -78,7 +79,7 @@ impl JobRepository {
         sqlx::query_as::<_, Job>(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled, env_vars
             FROM jobs
             WHERE name = ?
             "#,
@@ -94,7 +95,7 @@ impl JobRepository {
         let mut sql_query = String::from(
             r#"
             SELECT id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
+                   use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled, env_vars
             FROM jobs
             WHERE 1=1
             "#,
@@ -154,7 +155,7 @@ impl JobRepository {
             UPDATE jobs
             SET name = ?, description = ?, python_code = ?, timeout_seconds = ?,
                 memory_limit_mb = ?, use_custom_venv = ?, venv_id = ?, priority = ?, max_retries = ?,
-                current_version = ?, updated_at = ?, enabled = ?
+                current_version = ?, updated_at = ?, enabled = ?, env_vars = ?
             WHERE id = ?
             "#,
         )
@@ -170,6 +171,7 @@ impl JobRepository {
         .bind(job.current_version)
         .bind(&job.updated_at)
         .bind(job.enabled)
+        .bind(&job.env_vars)
         .bind(&job.id)
         .execute(&self.pool)
         .await
@@ -199,8 +201,8 @@ impl JobRepository {
             r#"
             INSERT INTO jobs (
                 id, name, description, python_code, timeout_seconds, memory_limit_mb,
-                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                use_custom_venv, venv_id, priority, max_retries, current_version, created_at, updated_at, enabled, env_vars
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&job.id)
@@ -217,6 +219,7 @@ impl JobRepository {
         .bind(&job.created_at)
         .bind(&job.updated_at)
         .bind(job.enabled)
+        .bind(&job.env_vars)
         .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -249,7 +252,7 @@ impl JobRepository {
             UPDATE jobs
             SET name = ?, description = ?, python_code = ?, timeout_seconds = ?,
                 memory_limit_mb = ?, use_custom_venv = ?, venv_id = ?, priority = ?, max_retries = ?,
-                current_version = ?, updated_at = ?, enabled = ?
+                current_version = ?, updated_at = ?, enabled = ?, env_vars = ?
             WHERE id = ?
             "#,
         )
@@ -265,6 +268,7 @@ impl JobRepository {
         .bind(job.current_version)
         .bind(&job.updated_at)
         .bind(job.enabled)
+        .bind(&job.env_vars)
         .bind(&job.id)
         .execute(&mut *tx)
         .await
@@ -298,8 +302,8 @@ impl JobRepository {
             INSERT INTO job_versions (
                 id, job_id, version_number, name, description, python_code, timeout_seconds,
                 memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
-                created_at, change_summary, source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                created_at, change_summary, source, env_vars
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&version.id)
@@ -318,6 +322,7 @@ impl JobRepository {
         .bind(&version.created_at)
         .bind(&version.change_summary)
         .bind(&version.source)
+        .bind(&version.env_vars)
         .execute(&mut **tx)
         .await
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -331,7 +336,7 @@ impl JobRepository {
             r#"
             SELECT id, job_id, version_number, name, description, python_code, timeout_seconds,
                    memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
-                   created_at, change_summary, source
+                   created_at, change_summary, source, env_vars
             FROM job_versions
             WHERE job_id = ?
             ORDER BY version_number DESC
@@ -349,7 +354,7 @@ impl JobRepository {
             r#"
             SELECT id, job_id, version_number, name, description, python_code, timeout_seconds,
                    memory_limit_mb, use_custom_venv, venv_id, priority, max_retries, enabled,
-                   created_at, change_summary, source
+                   created_at, change_summary, source, env_vars
             FROM job_versions
             WHERE job_id = ? AND version_number = ?
             "#,

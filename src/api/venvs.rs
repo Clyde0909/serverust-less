@@ -227,6 +227,7 @@ pub async fn toggle_job_venv(
         } else {
             "Switched job back to main virtual environment".to_string()
         }),
+        env_vars: None,
     };
     let updated_job = state.job_service.update_job(&job_id, update).await?;
 

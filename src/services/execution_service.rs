@@ -197,6 +197,15 @@ impl ExecutionService {
 
         debug!(retry_count = execution.retry_count + 1, "Creating retry execution");
         
+        // Persist the incremented retry_count on the source execution so that
+        // subsequent retry attempts against the same execution are correctly
+        // rejected when max_retries is reached.
+        let mut source_execution = execution.clone();
+        source_execution.retry_count = execution.retry_count + 1;
+        if let Err(e) = self.execution_repo.update(&source_execution).await {
+            warn!(error = %e, "Failed to persist retry_count on source execution");
+        }
+
         // Create a new execution for retry
         let input_data = execution
             .input_data

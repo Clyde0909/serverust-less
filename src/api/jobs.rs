@@ -27,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/jobs/:id/enable", post(enable_job))
         .route("/jobs/:id/disable", post(disable_job))
         .route("/jobs/:id/clone", post(clone_job))
+        .route("/jobs/:id/env", get(get_job_env).put(update_job_env))
 }
 
 /// List all jobs with pagination
@@ -336,5 +337,63 @@ pub async fn restore_job_version(
     Json(req): Json<Option<RestoreJobVersionRequest>>,
 ) -> Result<Json<Job>, AppError> {
     let job = state.job_service.restore_job_version(&id, version, req).await?;
+    Ok(Json(job))
+}
+
+/// Get environment variables for a job
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/{id}/env",
+    tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job ID")
+    ),
+    responses(
+        (status = 200, description = "Job environment variables", body = serde_json::Value),
+        (status = 404, description = "Job not found", body = ErrorResponse)
+    )
+)]
+pub async fn get_job_env(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job = state.job_service.get_job(&id).await?;
+    Ok(Json(job.env_vars.unwrap_or(serde_json::Value::Null)))
+}
+
+/// Update environment variables for a job
+#[utoipa::path(
+    put,
+    path = "/api/v1/jobs/{id}/env",
+    tag = "jobs",
+    params(
+        ("id" = String, Path, description = "Job ID")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Environment variables updated", body = Job),
+        (status = 404, description = "Job not found", body = ErrorResponse)
+    )
+)]
+pub async fn update_job_env(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Job>, AppError> {
+    let update = UpdateJobRequest {
+        name: None,
+        description: None,
+        python_code: None,
+        timeout_seconds: None,
+        memory_limit_mb: None,
+        use_custom_venv: None,
+        venv_id: None,
+        priority: None,
+        max_retries: None,
+        enabled: None,
+        change_summary: Some("Updated environment variables".to_string()),
+        env_vars: Some(body),
+    };
+    let job = state.job_service.update_job(&id, update).await?;
     Ok(Json(job))
 }

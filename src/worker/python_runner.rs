@@ -1,5 +1,6 @@
 //! Python code runner - executes Python code in a subprocess
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -7,6 +8,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
+
+use crate::models::execution::ExecutionContext;
 
 /// Result of Python execution
 #[derive(Debug, Clone)]
@@ -48,6 +51,8 @@ impl PythonRunner {
         input_data: Option<&str>,
         timeout_seconds: u64,
         memory_limit_mb: u64,
+        env_vars: Option<&HashMap<String, String>>,
+        context: Option<&ExecutionContext>,
     ) -> ExecutionResult {
         let start = std::time::Instant::now();
 
@@ -58,25 +63,8 @@ impl PythonRunner {
             venv_path.join("bin").join("python")
         };
 
-        // Prepare the code with optional input data handling
-        let full_code = if let Some(input) = input_data {
-            format!(
-                r#"
-import json
-import sys
-
-# Input data
-INPUT_DATA = json.loads('''{}''')
-
-# User code
-{}
-"#,
-                input.replace("'''", r"\'\'\'"),
-                code
-            )
-        } else {
-            code.to_string()
-        };
+        // Prepare the code with optional input data and execution context
+        let full_code = Self::build_code_template(code, input_data, context);
 
         debug!(
             venv = %venv_path.display(),
@@ -103,7 +91,7 @@ INPUT_DATA = json.loads('''{}''')
 
         // Build the command with resource limits
         let result = self
-            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb, None)
+            .spawn_with_limits(&chosen_python_path, &full_code, timeout_seconds, memory_limit_mb, None, env_vars)
             .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -147,6 +135,41 @@ INPUT_DATA = json.loads('''{}''')
         }
     }
 
+    /// Build the Python code template with INPUT_DATA and EXECUTION_CONTEXT globals
+    fn build_code_template(
+        code: &str,
+        input_data: Option<&str>,
+        context: Option<&ExecutionContext>,
+    ) -> String {
+        let mut preamble = String::from("import json\nimport sys\n\n");
+
+        // Inject INPUT_DATA if provided
+        if let Some(input) = input_data {
+            preamble.push_str(&format!(
+                "# Input data\nINPUT_DATA = json.loads('''{}''')\n\n",
+                input.replace("'''", r"\'\'\'")
+            ));
+        } else {
+            preamble.push_str("# No input data\nINPUT_DATA = None\n\n");
+        }
+
+        // Inject EXECUTION_CONTEXT if provided
+        if let Some(ctx) = context {
+            let ctx_json = serde_json::to_string(ctx).unwrap_or_else(|_| "{}".to_string());
+            preamble.push_str(&format!(
+                "# Execution context\nEXECUTION_CONTEXT = json.loads('''{}''')\n\n",
+                ctx_json.replace("'''", r"\'\'\'")
+            ));
+        } else {
+            preamble.push_str("# No execution context\nEXECUTION_CONTEXT = None\n\n");
+        }
+
+        preamble.push_str("# User code\n");
+        preamble.push_str(code);
+
+        preamble
+    }
+
     /// Spawn Python process with resource limits.
     /// If `pid_tx` is provided the child's OS PID is sent through it immediately
     /// after a successful `spawn()`, before the process is awaited.  This lets
@@ -158,6 +181,7 @@ INPUT_DATA = json.loads('''{}''')
         timeout_seconds: u64,
         memory_limit_mb: u64,
         pid_tx: Option<tokio::sync::oneshot::Sender<u32>>,
+        env_vars: Option<&HashMap<String, String>>,
     ) -> Result<ExecutionResult, String> {
         debug!(
             python = %python_path.display(),
@@ -188,6 +212,11 @@ INPUT_DATA = json.loads('''{}''')
 
         // Set environment variables
         cmd.env("PYTHONUNBUFFERED", "1");
+        if let Some(vars) = env_vars {
+            for (key, value) in vars {
+                cmd.env(key, value);
+            }
+        }
 
         let spawn_result = cmd.spawn();
 
@@ -375,6 +404,8 @@ INPUT_DATA = json.loads('''{}''')
         timeout_seconds: u64,
         memory_limit_mb: u64,
         pid_tx: tokio::sync::oneshot::Sender<u32>,
+        env_vars: Option<&HashMap<String, String>>,
+        context: Option<&ExecutionContext>,
     ) -> ExecutionResult {
         let start = std::time::Instant::now();
 
@@ -384,24 +415,7 @@ INPUT_DATA = json.loads('''{}''')
             venv_path.join("bin").join("python")
         };
 
-        let full_code = if let Some(input) = input_data {
-            format!(
-                r#"
-import json
-import sys
-
-# Input data
-INPUT_DATA = json.loads('''{inp}''')
-
-# User code
-{code}
-"#,
-                inp = input.replace("'''", r"\'\'\'" ),
-                code = code
-            )
-        } else {
-            code.to_string()
-        };
+        let full_code = Self::build_code_template(code, input_data, context);
 
         let chosen_python_path = if python_path.exists() {
             python_path
@@ -421,6 +435,7 @@ INPUT_DATA = json.loads('''{inp}''')
                 timeout_seconds,
                 memory_limit_mb,
                 Some(pid_tx),
+                env_vars,
             )
             .await;
 

@@ -272,7 +272,7 @@ impl DagEngine {
             self.dag_repo.update_node_execution(&running_node).await?;
 
             // Enqueue for worker pool
-            let queue_item = QueueItem::new(
+            let queue_item = QueueItem::new_with_context(
                 &execution.id,
                 &job.id,
                 job.priority,
@@ -281,6 +281,9 @@ impl DagEngine {
                 job.memory_limit_mb,
                 execution.input_data.clone(),
                 job.use_custom_venv,
+                job.env_vars.clone(),
+                Some(dag_run_id.to_string()),
+                Some(node.id.clone()),
             );
 
             if let Err(e) = self.queue_manager.enqueue(queue_item).await {

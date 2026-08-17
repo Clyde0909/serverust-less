@@ -307,6 +307,7 @@ impl Default for AppConfig {
                 port: default_port(),
                 log_level: default_log_level(),
                 cors: CorsConfig::default(),
+                rate_limit: RateLimitConfig::default(),
             },
             database: DatabaseConfig {
                 path: default_db_path(),

@@ -202,7 +202,7 @@ pub async fn retry_execution(
         .job_service
         .get_job_version(&execution.job_id, execution.job_version)
         .await?;
-    let item = QueueItem::new(
+    let item = QueueItem::new_with_context(
         &execution.id,
         &execution.job_id,
         job_version.priority,
@@ -211,6 +211,9 @@ pub async fn retry_execution(
         job_version.memory_limit_mb,
         execution.input_data.clone(),
         job_version.use_custom_venv,
+        job_version.env_vars.clone(),
+        None,
+        None,
     );
     state
         .queue_manager
@@ -249,7 +252,7 @@ pub async fn execute_job(
 
     // Fetch job details needed to build the QueueItem
     let job = state.job_service.get_job(&job_id).await?;
-    let item = QueueItem::new(
+    let item = QueueItem::new_with_context(
         &execution.id,
         &job.id,
         priority,
@@ -258,6 +261,9 @@ pub async fn execute_job(
         job.memory_limit_mb,
         execution.input_data.clone(),
         job.use_custom_venv,
+        job.env_vars.clone(),
+        None,
+        None,
     );
     state
         .queue_manager

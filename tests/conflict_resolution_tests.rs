@@ -14,7 +14,6 @@ use serverust_less::db::{
     ExecutionRepository, JobRepository, PackageRepository, QueueRepository, ScheduleRepository,
     VenvRepository,
 };
-use serverust_less::models::{PackageCache, PackageStatus};
 use serverust_less::queue::QueueManager;
 use serverust_less::services::{
     AuditService, DagService, ExecutionService, JobService, PackageService, QueueService,
@@ -27,7 +26,6 @@ use tower::ServiceExt;
 /// Setup options to allow different PackageService configurations
 struct SetupOpts {
     conflict_strategy: Option<String>,
-    with_workers: bool,
 }
 
 async fn setup_with(opts: SetupOpts) -> (Router, PackageRepository) {
@@ -95,7 +93,6 @@ async fn setup_with(opts: SetupOpts) -> (Router, PackageRepository) {
 async fn setup() -> Router {
     let (app, _) = setup_with(SetupOpts {
         conflict_strategy: None,
-        with_workers: false,
     })
     .await;
     app

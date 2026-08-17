@@ -108,6 +108,12 @@ pub struct QueueItem {
     pub input_data: Option<String>,
     /// Use custom venv
     pub use_custom_venv: bool,
+    /// Environment variables to inject (JSON object)
+    pub env_vars: Option<serde_json::Value>,
+    /// DAG run ID if this execution is part of a DAG
+    pub dag_run_id: Option<String>,
+    /// DAG node execution ID if this execution is part of a DAG
+    pub dag_node_id: Option<String>,
 }
 
 impl QueueEntry {
@@ -171,6 +177,38 @@ impl QueueItem {
             memory_limit_mb,
             input_data,
             use_custom_venv,
+            env_vars: None,
+            dag_run_id: None,
+            dag_node_id: None,
+        }
+    }
+
+    /// Create with full context including env vars and DAG metadata
+    pub fn new_with_context(
+        execution_id: &str,
+        job_id: &str,
+        priority: i32,
+        python_code: &str,
+        timeout_seconds: i32,
+        memory_limit_mb: i32,
+        input_data: Option<String>,
+        use_custom_venv: bool,
+        env_vars: Option<serde_json::Value>,
+        dag_run_id: Option<String>,
+        dag_node_id: Option<String>,
+    ) -> Self {
+        Self {
+            execution_id: execution_id.to_string(),
+            job_id: job_id.to_string(),
+            priority,
+            python_code: python_code.to_string(),
+            timeout_seconds,
+            memory_limit_mb,
+            input_data,
+            use_custom_venv,
+            env_vars,
+            dag_run_id,
+            dag_node_id,
         }
     }
 }

@@ -142,6 +142,22 @@ pub struct ExecutionWithJob {
     pub job_name: String,
 }
 
+/// Execution context injected into Python runtime alongside INPUT_DATA
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionContext {
+    pub execution_id: String,
+    pub job_id: String,
+    pub job_name: String,
+    pub job_version: i32,
+    pub memory_limit_mb: i32,
+    pub timeout_seconds: i32,
+    pub attempt: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dag_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dag_node_id: Option<String>,
+}
+
 fn default_limit() -> i32 {
     20
 }

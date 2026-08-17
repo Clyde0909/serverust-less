@@ -108,7 +108,7 @@ impl SchedulerRunner {
             };
 
             // Enqueue
-            let queue_item = QueueItem::new(
+            let queue_item = QueueItem::new_with_context(
                 &execution.id,
                 &job.id,
                 job.priority,
@@ -117,6 +117,9 @@ impl SchedulerRunner {
                 job.memory_limit_mb,
                 execution.input_data.clone(),
                 job.use_custom_venv,
+                job.env_vars.clone(),
+                None,
+                None,
             );
 
             if let Err(e) = self.queue_manager.enqueue(queue_item).await {

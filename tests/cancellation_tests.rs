@@ -222,6 +222,10 @@ async fn test_max_retry_enforcement() {
     let exec = json_body(exec_resp).await;
     let exec_id = exec["id"].as_str().unwrap();
 
+    // Cancel first so retry becomes valid (only terminal states can be retried)
+    let cancel_resp = send_empty(&app, Method::POST, &format!("/api/v1/executions/{}/cancel", exec_id)).await;
+    assert_eq!(cancel_resp.status(), StatusCode::OK);
+
     // First retry should work
     let retry1 = send_empty(&app, Method::POST, &format!("/api/v1/executions/{}/retry", exec_id)).await;
     assert_eq!(retry1.status(), StatusCode::OK);

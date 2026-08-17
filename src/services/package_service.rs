@@ -329,11 +329,15 @@ impl PackageService {
         req: AddDependencyRequest,
     ) -> Result<JobDependency, AppError> {
         // Validate package name
-        if req.package_name.trim().is_empty() {
+        let name = req.package_name.trim();
+        if name.is_empty() {
             return Err(AppError::Validation("Package name cannot be empty".to_string()));
         }
+        if let Err(msg) = validate_package_name(name) {
+            return Err(AppError::Validation(msg));
+        }
 
-        let dep = JobDependency::new(job_id, &req.package_name, req.version_constraint);
+        let dep = JobDependency::new(job_id, name, req.version_constraint);
         self.repo.add_dependency(&dep).await
     }
 
@@ -412,5 +416,103 @@ impl PackageService {
             status: overall_status,
             packages,
         })
+    }
+}
+
+/// Validate a Python package name against PyPI conventions and reject shell metacharacters.
+///
+/// Rules:
+/// 1. Must be non-empty and at most 214 characters (PEP 508 / PyPI limit).
+/// 2. Must start and end with an ASCII letter or digit.
+/// 3. Interior characters may be letters, digits, underscores, hyphens, or dots only.
+/// 4. Must not contain whitespace or shell metacharacters that could enable injection.
+pub(crate) fn validate_package_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Package name cannot be empty".to_string());
+    }
+    if name.len() > 214 {
+        return Err("Package name must be at most 214 characters".to_string());
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphanumeric() {
+        return Err(format!(
+            "Package name must start with a letter or digit; got '{}'",
+            first
+        ));
+    }
+    let last = name.chars().last().unwrap();
+    if !last.is_ascii_alphanumeric() {
+        return Err(format!(
+            "Package name must end with a letter or digit; got '{}'",
+            last
+        ));
+    }
+    for c in name.chars() {
+        if !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.') {
+            return Err(format!(
+                "Package name contains invalid character '{}'; only letters, digits, '_', '-', and '.' are allowed",
+                c
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_package_name_valid() {
+        assert!(validate_package_name("requests").is_ok());
+        assert!(validate_package_name("numpy").is_ok());
+        assert!(validate_package_name("my_pkg.name").is_ok());
+        assert!(validate_package_name("my-pkg-name").is_ok());
+        assert!(validate_package_name("A").is_ok());
+        assert!(validate_package_name("package123").is_ok());
+    }
+
+    #[test]
+    fn test_validate_package_name_empty() {
+        let result = validate_package_name("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_validate_package_name_shell_injection() {
+        // "rm -rf /" should be rejected: contains spaces and forward slash
+        let result = validate_package_name("rm -rf /");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_shell_metacharacter() {
+        // Shell dangerous characters must be rejected
+        for bad in &["$HOME", "pkg;ls", "pkg|cat", "pkg&bg", "pkg$(whoami)", "pkg`x`"] {
+            let result = validate_package_name(bad);
+            assert!(result.is_err(), "expected rejection for {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn test_validate_package_name_leading_trailing_special() {
+        // Leading underscore / hyphen / dot not allowed
+        assert!(validate_package_name("_pkg").is_err());
+        assert!(validate_package_name("-pkg").is_err());
+        assert!(validate_package_name(".pkg").is_err());
+        // Trailing underscore / hyphen / dot not allowed
+        assert!(validate_package_name("pkg_").is_err());
+        assert!(validate_package_name("pkg-").is_err());
+        assert!(validate_package_name("pkg.").is_err());
+    }
+
+    #[test]
+    fn test_validate_package_name_too_long() {
+        let long = "a".repeat(215);
+        let result = validate_package_name(&long);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("214"));
     }
 }

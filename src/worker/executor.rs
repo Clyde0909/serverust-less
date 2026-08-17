@@ -1,8 +1,10 @@
 //! Job executor - coordinates job execution
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::models::execution::ExecutionContext;
 use crate::models::QueueItem;
 use crate::worker::python_runner::{ExecutionResult, PythonRunner};
 
@@ -42,6 +44,8 @@ impl JobExecutor {
     /// Execute a queued item
     pub async fn execute(&self, item: &QueueItem) -> ExecutionResult {
         let venv_path = self.get_venv_path(item);
+        let env_vars = self.extract_env_vars(item);
+        let context = self.build_context(item);
         self.runner
             .execute(
                 &venv_path,
@@ -49,6 +53,8 @@ impl JobExecutor {
                 item.input_data.as_deref(),
                 item.timeout_seconds as u64,
                 item.memory_limit_mb as u64,
+                env_vars.as_ref(),
+                context.as_ref(),
             )
             .await
     }
@@ -61,6 +67,8 @@ impl JobExecutor {
         pid_tx: tokio::sync::oneshot::Sender<u32>,
     ) -> ExecutionResult {
         let venv_path = self.get_venv_path(item);
+        let env_vars = self.extract_env_vars(item);
+        let context = self.build_context(item);
         self.runner
             .execute_with_pid(
                 &venv_path,
@@ -69,8 +77,36 @@ impl JobExecutor {
                 item.timeout_seconds as u64,
                 item.memory_limit_mb as u64,
                 pid_tx,
+                env_vars.as_ref(),
+                context.as_ref(),
             )
             .await
+    }
+
+    /// Extract env_vars from QueueItem as HashMap
+    fn extract_env_vars(&self, item: &QueueItem) -> Option<HashMap<String, String>> {
+        item.env_vars.as_ref().and_then(|v| {
+            v.as_object().map(|obj| {
+                obj.iter()
+                    .map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string()))
+                    .collect()
+            })
+        })
+    }
+
+    /// Build ExecutionContext from QueueItem metadata
+    fn build_context(&self, item: &QueueItem) -> Option<ExecutionContext> {
+        Some(ExecutionContext {
+            execution_id: item.execution_id.clone(),
+            job_id: item.job_id.clone(),
+            job_name: String::new(), // populated by caller if available
+            job_version: 0,          // populated by caller if available
+            memory_limit_mb: item.memory_limit_mb,
+            timeout_seconds: item.timeout_seconds,
+            attempt: 0,              // populated by caller if available
+            dag_run_id: item.dag_run_id.clone(),
+            dag_node_id: item.dag_node_id.clone(),
+        })
     }
 
     /// Create execution result from runner result (test-only helper)
