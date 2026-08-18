@@ -402,7 +402,7 @@ async fn assess_disk(state: &AppState) -> HealthAssessment {
                     let stat = nix::sys::statvfs::statvfs(path);
                     match stat {
                         Ok(s) => {
-                            let avail_bytes = s.blocks_available() as u64 * s.block_size() as u64;
+                            let avail_bytes = s.blocks_available() * s.block_size();
                             let gb = avail_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
                             if gb < 0.1 {
                                 degraded = true;

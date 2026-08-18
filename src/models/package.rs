@@ -57,7 +57,7 @@ impl PackageStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "installing" => Some(PackageStatus::Installing),
             "ready" => Some(PackageStatus::Ready),

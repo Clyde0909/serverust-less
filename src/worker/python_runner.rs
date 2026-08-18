@@ -30,6 +30,22 @@ pub struct ExecutionResult {
     pub memory_exceeded: bool,
 }
 
+/// Bundled parameters for a Python execution request.
+///
+/// Groups the per-execution arguments passed to [`PythonRunner::execute`] and
+/// [`PythonRunner::execute_with_pid`] so those methods stay under the
+/// recommended argument count.
+#[derive(Debug, Clone)]
+pub struct ExecutionParams<'a> {
+    pub venv_path: &'a Path,
+    pub code: &'a str,
+    pub input_data: Option<&'a str>,
+    pub timeout_seconds: u64,
+    pub memory_limit_mb: u64,
+    pub env_vars: Option<&'a HashMap<String, String>>,
+    pub context: Option<&'a ExecutionContext>,
+}
+
 /// Python runner for executing code
 pub struct PythonRunner {
     python_executable: String,
@@ -44,16 +60,16 @@ impl PythonRunner {
     }
 
     /// Execute Python code with the given venv
-    pub async fn execute(
-        &self,
-        venv_path: &Path,
-        code: &str,
-        input_data: Option<&str>,
-        timeout_seconds: u64,
-        memory_limit_mb: u64,
-        env_vars: Option<&HashMap<String, String>>,
-        context: Option<&ExecutionContext>,
-    ) -> ExecutionResult {
+    pub async fn execute(&self, params: ExecutionParams<'_>) -> ExecutionResult {
+        let ExecutionParams {
+            venv_path,
+            code,
+            input_data,
+            timeout_seconds,
+            memory_limit_mb,
+            env_vars,
+            context,
+        } = params;
         let start = std::time::Instant::now();
 
         // Construct the Python executable path from venv
@@ -398,15 +414,18 @@ impl PythonRunner {
     /// immediately after spawn so the caller can arrange cancellation.
     pub async fn execute_with_pid(
         &self,
-        venv_path: &Path,
-        code: &str,
-        input_data: Option<&str>,
-        timeout_seconds: u64,
-        memory_limit_mb: u64,
+        params: ExecutionParams<'_>,
         pid_tx: tokio::sync::oneshot::Sender<u32>,
-        env_vars: Option<&HashMap<String, String>>,
-        context: Option<&ExecutionContext>,
     ) -> ExecutionResult {
+        let ExecutionParams {
+            venv_path,
+            code,
+            input_data,
+            timeout_seconds,
+            memory_limit_mb,
+            env_vars,
+            context,
+        } = params;
         let start = std::time::Instant::now();
 
         let python_path = if cfg!(windows) {

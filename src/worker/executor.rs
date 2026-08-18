@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::models::execution::ExecutionContext;
 use crate::models::QueueItem;
-use crate::worker::python_runner::{ExecutionResult, PythonRunner};
+use crate::worker::python_runner::{ExecutionParams, ExecutionResult, PythonRunner};
 
 #[cfg(test)]
 use crate::models::Execution;
@@ -47,15 +47,15 @@ impl JobExecutor {
         let env_vars = self.extract_env_vars(item);
         let context = self.build_context(item);
         self.runner
-            .execute(
-                &venv_path,
-                &item.python_code,
-                item.input_data.as_deref(),
-                item.timeout_seconds as u64,
-                item.memory_limit_mb as u64,
-                env_vars.as_ref(),
-                context.as_ref(),
-            )
+            .execute(ExecutionParams {
+                venv_path: &venv_path,
+                code: &item.python_code,
+                input_data: item.input_data.as_deref(),
+                timeout_seconds: item.timeout_seconds as u64,
+                memory_limit_mb: item.memory_limit_mb as u64,
+                env_vars: env_vars.as_ref(),
+                context: context.as_ref(),
+            })
             .await
     }
 
@@ -71,14 +71,16 @@ impl JobExecutor {
         let context = self.build_context(item);
         self.runner
             .execute_with_pid(
-                &venv_path,
-                &item.python_code,
-                item.input_data.as_deref(),
-                item.timeout_seconds as u64,
-                item.memory_limit_mb as u64,
+                ExecutionParams {
+                    venv_path: &venv_path,
+                    code: &item.python_code,
+                    input_data: item.input_data.as_deref(),
+                    timeout_seconds: item.timeout_seconds as u64,
+                    memory_limit_mb: item.memory_limit_mb as u64,
+                    env_vars: env_vars.as_ref(),
+                    context: context.as_ref(),
+                },
                 pid_tx,
-                env_vars.as_ref(),
-                context.as_ref(),
             )
             .await
     }

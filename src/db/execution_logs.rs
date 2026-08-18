@@ -124,12 +124,12 @@ impl ExecutionLogRepository {
         limit: i32,
     ) -> Result<(Vec<ExecutionLog>, i64), AppError> {
         // Get total count
-        let count_query = if log_type.is_some() {
+        let count_query = if let Some(lt) = log_type {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM execution_logs WHERE execution_id = ? AND log_type = ?",
             )
             .bind(execution_id)
-            .bind(log_type.unwrap())
+            .bind(lt)
             .fetch_one(&self.pool)
             .await
         } else {

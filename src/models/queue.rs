@@ -28,7 +28,7 @@ impl QueueStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "queued" => Some(QueueStatus::Queued),
             "processing" => Some(QueueStatus::Processing),
@@ -158,6 +158,7 @@ impl QueueEntry {
 
 impl QueueItem {
     /// Create from execution and job
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         execution_id: &str,
         job_id: &str,
@@ -184,6 +185,7 @@ impl QueueItem {
     }
 
     /// Create with full context including env vars and DAG metadata
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_context(
         execution_id: &str,
         job_id: &str,

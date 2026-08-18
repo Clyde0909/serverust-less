@@ -325,7 +325,7 @@ impl ExecutionRepository {
             )
             .bind(status.as_str())
             .bind(&error_message)
-            .bind(&now)
+            .bind(now)
             .bind(duration_ms)
             .bind(id)
             .execute(&self.pool)

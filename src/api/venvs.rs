@@ -73,7 +73,7 @@ pub async fn create_venv(
         .venv_manager
         .create_named_venv_with_python(&name, &python_exe)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     // Detect Python version
     let python_version = state

@@ -7,9 +7,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Execution status enum
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ExecutionStatus {
+    #[default]
     Pending,
     Queued,
     Running,
@@ -32,7 +33,7 @@ impl ExecutionStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "pending" => Some(ExecutionStatus::Pending),
             "queued" => Some(ExecutionStatus::Queued),
@@ -53,12 +54,6 @@ impl ExecutionStatus {
                 | ExecutionStatus::Timeout
                 | ExecutionStatus::Cancelled
         )
-    }
-}
-
-impl Default for ExecutionStatus {
-    fn default() -> Self {
-        ExecutionStatus::Pending
     }
 }
 
@@ -185,7 +180,7 @@ impl Execution {
 
     /// Get the status as enum
     pub fn status_enum(&self) -> ExecutionStatus {
-        ExecutionStatus::from_str(&self.status).unwrap_or_default()
+        ExecutionStatus::parse_str(&self.status).unwrap_or_default()
     }
 
     /// Mark as queued

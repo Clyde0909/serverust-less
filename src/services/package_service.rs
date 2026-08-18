@@ -120,7 +120,8 @@ impl PackageService {
                                 req.name, existing.version, requested_version
                             );
                         }
-                        "force_upgrade" | _ => {
+                        _ => {
+                            // "force_upgrade" or any unknown strategy: proceed with upgrade
                             info!(
                                 "Force upgrading {} from v{} to v{}",
                                 req.name, existing.version, requested_version

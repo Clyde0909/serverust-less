@@ -24,7 +24,7 @@ impl LogType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "stdout" => Some(LogType::Stdout),
             "stderr" => Some(LogType::Stderr),

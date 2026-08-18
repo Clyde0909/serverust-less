@@ -136,9 +136,7 @@ impl DagService {
         let mut edges = self.dag_repo.get_edges_by_dag_id(dag_id).await?;
         edges.push(edge.clone());
 
-        if let Err(e) = Self::validate_no_cycles(&edges) {
-            return Err(e);
-        }
+        Self::validate_no_cycles(&edges)?;
 
         info!(dag_id = %dag_id, upstream = %req.upstream_job_id, downstream = %req.downstream_job_id, "Edge added");
         self.dag_repo.create_edge(&edge).await

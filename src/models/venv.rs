@@ -31,7 +31,7 @@ impl VenvType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "main" => Some(VenvType::Main),
             "custom" => Some(VenvType::Custom),
@@ -62,7 +62,7 @@ impl VenvStatus {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "creating" => Some(VenvStatus::Creating),
             "ready" => Some(VenvStatus::Ready),

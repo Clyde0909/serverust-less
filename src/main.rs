@@ -17,7 +17,7 @@ use serverust_less::services::{
     AuditService, DagService, ExecutionService, JobService, PackageService, QueueService,
     ScheduleService, VenvService,
 };
-use serverust_less::worker::{PackageManager, ProcessManager, VenvManager, WorkerPool};
+use serverust_less::worker::{PackageManager, ProcessManager, VenvManager, WorkerPool, WorkerPoolConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -203,18 +203,18 @@ async fn main() -> anyhow::Result<()> {
     // -------------------------------------------------------------------------
     // Worker pool
     // -------------------------------------------------------------------------
-    let (worker_pool, mut result_rx) = WorkerPool::new(
-        config.worker.pool_size,
-        abs_main_venv_path.clone(),
-        abs_custom_venv_base_path.clone(),
-        &config.worker.python_executable,
-        queue_manager.clone(),
-        process_manager.clone(),
-        execution_repo.clone(),
-        execution_log_repo.clone(),
-        job_repo.clone(),
-        Some(dag_engine.clone()),
-    );
+    let (worker_pool, mut result_rx) = WorkerPool::new(WorkerPoolConfig {
+        pool_size: config.worker.pool_size,
+        main_venv_path: abs_main_venv_path.clone(),
+        custom_venv_base_path: abs_custom_venv_base_path.clone(),
+        python_executable: config.worker.python_executable.clone(),
+        queue_manager: queue_manager.clone(),
+        process_manager: process_manager.clone(),
+        execution_repo: execution_repo.clone(),
+        log_repo: execution_log_repo.clone(),
+        job_repo: job_repo.clone(),
+        dag_engine: Some(dag_engine.clone()),
+    });
     info!(
         "Worker pool started with {} workers",
         config.worker.pool_size
